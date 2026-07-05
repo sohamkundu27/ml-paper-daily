@@ -1,0 +1,41 @@
+You are contributing to the "ml-paper-daily" repository. Your job today is to
+CONTINUE an in-progress paper by implementing ONLY ONE incremental pass.
+
+The paper slug is: {SLUG}
+The pass to implement today is: pass {PASS_NUM} of 4.
+
+STEP A — Understand what already exists
+- Read papers/{SLUG}/NOTES.md IN FULL first. It contains the paper summary, the
+  4-pass plan, and the "Implemented vs. simplified" log from previous passes.
+- Read the existing code in papers/{SLUG}/ so you build ON TOP of it rather than
+  duplicating or breaking it. Understand what previous passes already did.
+
+STEP B — Implement ONLY pass {PASS_NUM}
+Implement exactly this pass and no other:
+  * Pass 2 = the mechanism that makes the paper distinctive (its key idea).
+  * Pass 3 = another real increment, OR an honest, clearly-documented
+    simplification of a harder part of the method.
+  * Pass 4 = a small end-to-end demo on toy/synthetic data that ties the pieces
+    together, PLUS a final honest summary in NOTES.md of what was implemented
+    vs. simplified across all passes, and why.
+
+Guidelines:
+- Keep it small and runnable: plain Python with numpy and/or pytorch.
+- Extend the existing code; keep earlier passes working.
+- Add or extend a minimal test where it makes sense.
+- ACTUALLY RUN the code and tests before committing. NEVER commit broken code.
+  If something will not run, simplify it until it does and document that.
+- Update papers/{SLUG}/NOTES.md: append to the "Implemented vs. simplified"
+  section what pass {PASS_NUM} actually did and what remains simplified/stubbed.
+- Do NOT implement any pass other than pass {PASS_NUM}. Exactly one pass.
+
+STEP C — Commit
+- Stage changes with git. Commit with a SPECIFIC message describing what this
+  pass actually implemented, e.g.
+  "paper {SLUG}: pass {PASS_NUM} — <the specific thing you built>".
+- Push with git push.
+
+Constraints:
+- Only ONE pass (pass {PASS_NUM}).
+- Never commit broken code.
+- Keep dependencies minimal (numpy, pytorch, standard library).

@@ -1,0 +1,55 @@
+You are contributing to the "ml-paper-daily" repository. Your job today is to
+START a NEW paper by implementing ONLY the first of four incremental passes.
+
+Read README.md at the repo root first to understand the project's philosophy:
+each paper is implemented roughly one quarter per day, favoring small runnable
+increments and honesty over full reproduction.
+
+STEP A — Pick a paper
+- Use WebSearch to find ONE recent (published within roughly the last few
+  months), well-regarded ML paper. Good areas: computer vision, transformers /
+  architecture, efficient training/inference, generative models, or any
+  genuinely notable area. Prefer papers with a clear, self-contained core
+  method that can be built up incrementally.
+- List the existing subfolders under papers/ (if the directory exists) and pick
+  a paper that is NOT already covered there. Do not repeat a paper.
+
+STEP B — Create the folder and NOTES.md
+- Choose a short, descriptive, kebab-case <slug> for the paper.
+- Create the directory papers/<slug>/.
+- Write papers/<slug>/NOTES.md containing:
+  * Title
+  * arXiv (or official) link
+  * Authors
+  * A summary IN YOUR OWN WORDS. Do NOT reproduce text from the paper verbatim.
+    At most a SINGLE quoted phrase of fewer than 15 words is allowed, if truly
+    needed; otherwise paraphrase everything.
+  * A "Plan: 4 passes" section describing what each of the four passes will
+    implement. Pass 1 = the most foundational piece. Pass 2 = the mechanism
+    that makes the paper distinctive. Pass 3 = another real increment or an
+    honest simplification of a harder part. Pass 4 = a small end-to-end demo on
+    toy/synthetic data plus a final honest summary.
+  * An "Implemented vs. simplified" section. After pass 1, record exactly what
+    pass 1 does and what is still stubbed/simplified.
+
+STEP C — Implement ONLY pass 1
+- Implement the most foundational piece of the method. Keep it SMALL and
+  runnable: plain Python with numpy and/or pytorch. No giant training runs.
+- Include a minimal test (a test_*.py using asserts, or a pytest test).
+- ACTUALLY RUN the code and the test. If it fails, fix it. NEVER commit code
+  that does not run. If you cannot get something to run, simplify it until you
+  can, and document that in NOTES.md.
+- Do NOT attempt passes 2, 3, or 4 today. Exactly one pass.
+
+STEP D — Record the slug and commit
+- Write the chosen <slug> (just the bare slug, no newline noise) to the file
+  .current_paper_slug at the repo root.
+- Stage your changes with git. Commit with a SPECIFIC message describing what
+  pass 1 actually implements, e.g.
+  "paper <slug>: pass 1 — implement <the specific foundational piece>".
+- Push with git push.
+
+Constraints:
+- Only ONE pass. Only ONE paper.
+- Never commit broken code.
+- Keep dependencies minimal (numpy, pytorch, standard library).
