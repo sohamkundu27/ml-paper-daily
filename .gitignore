@@ -1,0 +1,6 @@
+# Automation state — local only, must not be tracked
+.paper_state
+.current_paper_slug
+
+# Logs
+*.log
