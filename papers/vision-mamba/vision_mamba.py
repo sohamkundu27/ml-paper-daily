@@ -87,13 +87,96 @@ class LinearSSMBlock(nn.Module):
         return torch.stack(outputs, dim=1)  # (batch, seq_len, embed_dim)
 
 
-class VisionMambaBlock(nn.Module):
-    """Vision Mamba block: position embedding + SSM + residual."""
+class SelectiveSSMBlock(nn.Module):
+    """Selective SSM block with input-dependent gating (Mamba's core mechanism)."""
 
-    def __init__(self, embed_dim, ssm_hidden_dim=128):
+    def __init__(self, embed_dim, hidden_dim=128):
         super().__init__()
-        self.ssm = LinearSSMBlock(embed_dim, hidden_dim=ssm_hidden_dim)
+        self.embed_dim = embed_dim
+        self.hidden_dim = hidden_dim
+
+        # Input projection to hidden dimension
+        self.in_proj = nn.Linear(embed_dim, hidden_dim)
+
+        # Gate control: learns to selectively activate parts of the state space
+        self.gate_proj = nn.Linear(embed_dim, hidden_dim)
+
+        # State transition matrix
+        self.A = nn.Parameter(torch.randn(hidden_dim, hidden_dim) * 0.1)
+
+        # Output projection back to embedding dimension
+        self.out_proj = nn.Linear(hidden_dim, embed_dim)
+
+    def forward(self, x, direction='forward'):
+        # x: (batch, seq_len, embed_dim)
+        batch_size, seq_len, _ = x.shape
+
+        # Reverse sequence if processing backward
+        if direction == 'backward':
+            x = torch.flip(x, [1])
+
+        # Project input and compute selective gate
+        x_proj = self.in_proj(x)  # (batch, seq_len, hidden_dim)
+        gate = torch.sigmoid(self.gate_proj(x))  # (batch, seq_len, hidden_dim)
+
+        # Apply selective gating to input projection
+        x_gated = x_proj * gate
+
+        # Process through SSM step-by-step
+        h = torch.zeros(batch_size, self.hidden_dim, device=x.device, dtype=x.dtype)
+        outputs = []
+        for t in range(seq_len):
+            x_t = x_gated[:, t, :]  # (batch, hidden_dim)
+            # State update: h_t = A @ h_{t-1} + x_t
+            h = torch.matmul(h, self.A.T) + x_t
+            # Output: project back to embedding dimension
+            y_t = self.out_proj(h)
+            outputs.append(y_t)
+
+        out = torch.stack(outputs, dim=1)  # (batch, seq_len, embed_dim)
+
+        # Reverse output if processing backward
+        if direction == 'backward':
+            out = torch.flip(out, [1])
+
+        return out
+
+
+class BidirectionalSSMBlock(nn.Module):
+    """Bidirectional SSM: combines forward and backward selective SSM passes."""
+
+    def __init__(self, embed_dim, hidden_dim=128):
+        super().__init__()
+        self.forward_ssm = SelectiveSSMBlock(embed_dim, hidden_dim)
+        self.backward_ssm = SelectiveSSMBlock(embed_dim, hidden_dim)
+        # Projection to combine forward and backward outputs
+        self.combine_proj = nn.Linear(embed_dim * 2, embed_dim)
+
+    def forward(self, x):
+        # x: (batch, seq_len, embed_dim)
+        # Process forward
+        out_fwd = self.forward_ssm(x, direction='forward')
+
+        # Process backward
+        out_bwd = self.backward_ssm(x, direction='backward')
+
+        # Concatenate and project to combine
+        out_combined = torch.cat([out_fwd, out_bwd], dim=-1)
+        out = self.combine_proj(out_combined)
+
+        return out
+
+
+class VisionMambaBlock(nn.Module):
+    """Vision Mamba block: selective bidirectional SSM + residual + layer norm."""
+
+    def __init__(self, embed_dim, ssm_hidden_dim=128, use_bidirectional=False):
+        super().__init__()
         self.norm = nn.LayerNorm(embed_dim)
+        if use_bidirectional:
+            self.ssm = BidirectionalSSMBlock(embed_dim, hidden_dim=ssm_hidden_dim)
+        else:
+            self.ssm = LinearSSMBlock(embed_dim, hidden_dim=ssm_hidden_dim)
 
     def forward(self, x):
         # x: (batch, num_patches, embed_dim)
@@ -115,7 +198,37 @@ class VisionMambaPass1(nn.Module):
         self.pos_embed = PositionalEmbedding(num_patches, embed_dim)
 
         self.blocks = nn.ModuleList([
-            VisionMambaBlock(embed_dim, ssm_hidden_dim=ssm_hidden_dim)
+            VisionMambaBlock(embed_dim, ssm_hidden_dim=ssm_hidden_dim, use_bidirectional=False)
+            for _ in range(num_blocks)
+        ])
+        self.norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, x):
+        # x: (batch, channels, height, width)
+        x = self.patcher(x)  # (batch, num_patches, embed_dim)
+        x = self.pos_embed(x)  # Add positional embeddings
+
+        for block in self.blocks:
+            x = block(x)  # (batch, num_patches, embed_dim)
+
+        x = self.norm(x)  # Final layer norm
+        return x  # (batch, num_patches, embed_dim)
+
+
+class VisionMambaPass2(nn.Module):
+    """Vision Mamba with selective bidirectional SSM blocks (pass 2)."""
+
+    def __init__(self, image_size=32, patch_size=4, in_channels=3,
+                 embed_dim=64, num_blocks=2, ssm_hidden_dim=128):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.patcher = ImagePatcher(image_size, patch_size, in_channels, embed_dim)
+        num_patches = (image_size // patch_size) ** 2
+        self.pos_embed = PositionalEmbedding(num_patches, embed_dim)
+
+        # Use bidirectional selective SSM blocks
+        self.blocks = nn.ModuleList([
+            VisionMambaBlock(embed_dim, ssm_hidden_dim=ssm_hidden_dim, use_bidirectional=True)
             for _ in range(num_blocks)
         ])
         self.norm = nn.LayerNorm(embed_dim)

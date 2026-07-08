@@ -55,3 +55,33 @@ Vision Mamba proposes using state space models (specifically, bidirectional Mamb
   7. Deterministic/consistent output
   
 All tests pass. Model is runnable and gradients flow.
+
+### After Pass 2:
+- **Implemented:**
+  * `SelectiveSSMBlock`: Core innovation—SSM with input-dependent selective gating. Each input is projected to hidden dimension, then multiplied by a learned sigmoid gate computed from the input. This gates which information flows through the state space. Supports bidirectional processing (forward/backward).
+  * `BidirectionalSSMBlock`: Combines forward and backward selective SSM passes. Concatenates outputs and projects back to embedding dimension. Captures context from both directions.
+  * Updated `VisionMambaBlock`: Now accepts `use_bidirectional` parameter to switch between original LinearSSMBlock (pass 1) and new BidirectionalSSMBlock (pass 2).
+  * `VisionMambaPass2`: New model using bidirectional selective SSM blocks. Same architecture as Pass 1 but with selective gating and bidirectionality.
+  * All components tested and working. Gradients flow through bidirectional blocks.
+  * Pass 1 backward compatibility maintained—both Pass 1 and Pass 2 models run and produce different outputs as expected.
+
+- **Simplified/Stubbed:**
+  * Selective gating is input-dependent via learned sigmoid projection, not the full parameter modulation in the real Mamba paper. This is a simplified approximation.
+  * Bidirectional pass still concatenates and projects; full Mamba uses separate parameters for fwd/bwd SSMs, not a simple concatenation.
+  * Still no classification head; outputs raw patch representations.
+  * No training loop or loss function yet.
+  * SSM state is still fully exposed (hidden state computed sequentially); real hardware-optimized Mamba uses structured state representations and parallel scan algorithms (not implemented).
+
+**Tests:** `test_vision_mamba_pass2.py` includes 10 tests covering:
+  1. Selective SSM forward direction
+  2. Selective SSM backward direction
+  3. Gating effect (gates actually affect output)
+  4. Bidirectional SSM block shape
+  5. Bidirectional vs unidirectional differences
+  6. Vision Mamba block with bidirectional option
+  7. Pass 1 backward compatibility
+  8. Pass 2 full model
+  9. Gradient flow through Pass 2
+  10. Pass 1 vs Pass 2 output differences
+  
+All tests pass. Gradients flow correctly. Model is ready for Pass 3 (classification head and training).
