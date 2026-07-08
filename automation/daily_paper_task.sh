@@ -27,6 +27,23 @@
 set -uo pipefail
 
 # ---------------------------------------------------------------------------
+# Environment for cron (cron's PATH is minimal — make node/claude/git resolve,
+# and make `git push` non-interactive over SSH).
+# ---------------------------------------------------------------------------
+export PATH="/home/soham/.nvm/versions/node/v24.16.0/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+# origin is git@github.com:...  — never prompt for a passphrase or host key.
+export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+# Full path to the claude CLI (it lives under nvm, which is not on cron's PATH).
+CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude || echo /home/soham/.nvm/versions/node/v24.16.0/bin/claude)}"
+RUN_TIMEOUT_SECS="${RUN_TIMEOUT_SECS:-1200}"   # wall-clock safety cap per claude call
+
+# Probabilistic skip. The daily schedule fires this script twice; the SECOND
+# slot passes SKIP_PROBABILITY=50 so it runs only ~half the time. Net effect:
+# a random 1-2 commits per day, with the first (unskipped) slot guaranteeing at
+# least one commit every single day.
+SKIP_PROBABILITY="${SKIP_PROBABILITY:-0}"
+
+# ---------------------------------------------------------------------------
 # Paths & constants
 # ---------------------------------------------------------------------------
 REPO="$HOME/ml-paper-daily"
@@ -36,8 +53,8 @@ LOG="$REPO/paper_repo_cron.log"
 LOCK="$HOME/.ml-paper-daily.lock"   # kept OUTSIDE the repo so it's never committed
 
 MODEL="claude-haiku-4-5-20251001"
-NEW_PAPER_TOOLS="Read,Edit,Write,Grep,WebSearch,Bash(git:*),Bash(python:*),Bash(python3:*),Bash(pytest:*),Bash(pip:*),Bash(pip3:*)"
-CONTINUE_TOOLS="Read,Edit,Write,Grep,Bash(git:*),Bash(python:*),Bash(python3:*),Bash(pytest:*),Bash(pip:*),Bash(pip3:*)"
+NEW_PAPER_TOOLS="Read,Edit,Write,Grep,Glob,WebSearch,Bash(git:*),Bash(python:*),Bash(python3:*),Bash(pytest:*),Bash(pip:*),Bash(pip3:*),Bash(ls:*),Bash(mkdir:*),Bash(cat:*)"
+CONTINUE_TOOLS="Read,Edit,Write,Grep,Glob,Bash(git:*),Bash(python:*),Bash(python3:*),Bash(pytest:*),Bash(pip:*),Bash(pip3:*),Bash(ls:*),Bash(mkdir:*),Bash(cat:*)"
 NEW_PAPER_BUDGET="0.75"
 CONTINUE_BUDGET="0.50"
 
@@ -90,6 +107,16 @@ write_state() {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+# Probabilistic skip for the second daily slot (see SKIP_PROBABILITY above).
+if [[ "$SKIP_PROBABILITY" -gt 0 ]]; then
+    roll=$(( RANDOM % 100 ))
+    if [[ "$roll" -lt "$SKIP_PROBABILITY" ]]; then
+        log "probabilistic skip (roll=$roll < SKIP_PROBABILITY=$SKIP_PROBABILITY) — no run this slot"
+        exit 0
+    fi
+    log "probabilistic slot proceeding (roll=$roll >= SKIP_PROBABILITY=$SKIP_PROBABILITY)"
+fi
+
 acquire_lock
 
 mkdir -p "$REPO"
@@ -126,8 +153,9 @@ if [[ "$QUARTER" == "0" ]]; then
 
     PROMPT="$(cat "$REPO/automation/prompt_new_paper.txt")"
 
-    claude -p "$PROMPT" \
+    timeout "$RUN_TIMEOUT_SECS" "$CLAUDE_BIN" -p "$PROMPT" \
         --model "$MODEL" \
+        --permission-mode acceptEdits \
         --allowedTools "$NEW_PAPER_TOOLS" \
         --max-budget-usd "$NEW_PAPER_BUDGET" \
         --output-format json >> "$LOG" 2>&1
@@ -164,8 +192,9 @@ TEMPLATE="$(cat "$REPO/automation/prompt_continue_paper.txt")"
 PROMPT="${TEMPLATE//\{SLUG\}/$SLUG}"
 PROMPT="${PROMPT//\{PASS_NUM\}/$PASS_NUM}"
 
-claude -p "$PROMPT" \
+timeout "$RUN_TIMEOUT_SECS" "$CLAUDE_BIN" -p "$PROMPT" \
     --model "$MODEL" \
+    --permission-mode acceptEdits \
     --allowedTools "$CONTINUE_TOOLS" \
     --max-budget-usd "$CONTINUE_BUDGET" \
     --output-format json >> "$LOG" 2>&1

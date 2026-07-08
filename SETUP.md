@@ -6,16 +6,23 @@ required.
 
 ## What runs, and when
 
-- **Schedule:** every day at **09:00** (local machine time).
-- **Crontab line:**
+- **Schedule:** twice a day. The **09:00** slot always runs (guaranteeing at
+  least one commit every day); the **17:00** slot runs only ~50% of the time
+  (`SKIP_PROBABILITY=50`, a coin flip inside the script). Net effect: a
+  **random 1–2 commits per day**.
+- **Crontab lines:**
   ```
-  0 9 * * * /bin/bash $HOME/ml-paper-daily/automation/daily_paper_task.sh
+  0 9 * * *  /bin/bash /home/soham/ml-paper-daily/automation/daily_paper_task.sh
+  0 17 * * * SKIP_PROBABILITY=50 /bin/bash /home/soham/ml-paper-daily/automation/daily_paper_task.sh
   ```
 - **Driver script:** [`automation/daily_paper_task.sh`](automation/daily_paper_task.sh)
+  — it prepends nvm's bin to `PATH` and sets `GIT_SSH_COMMAND` so it works under
+  cron's minimal environment.
 - **Model:** `claude-haiku-4-5-20251001` (the cheapest current model), headless
-  (`claude -p ... --output-format json`).
-- **Cost cap per run:** `--max-budget-usd 0.75` on new-paper days,
-  `--max-budget-usd 0.50` on continuation days.
+  (`claude -p ... --permission-mode acceptEdits --output-format json`), wrapped
+  in `timeout` (20 min).
+- **Cost cap per run:** `--max-budget-usd 0.75` on new-paper runs,
+  `--max-budget-usd 0.50` on continuation runs (so ≤ ~$1.25 on a 2-commit day).
 
 ## The daily state machine
 
@@ -33,8 +40,9 @@ SLUG=<slug or empty>
 | 2               | Implement **pass 3** of current paper         | QUARTER=3        |
 | 3               | Implement **pass 4** (final), then reset      | QUARTER=0, empty |
 
-So each paper takes four days (one quarter per day); on the fifth day the cycle
-restarts with a brand-new paper. This repeats indefinitely.
+So each paper takes four passes. With a random 1–2 passes landing per day, a
+paper completes every ~2–4 days; then the cycle restarts with a brand-new
+paper. This repeats indefinitely.
 
 The prompts driving the agent are
 [`automation/prompt_new_paper.txt`](automation/prompt_new_paper.txt) and
@@ -70,14 +78,14 @@ simplified, pass by pass.
 
 ## How to pause / resume / stop
 
-- **Pause:** comment out the line in your crontab.
+- **Pause:** comment out both `daily_paper_task.sh` lines in your crontab.
   ```bash
-  crontab -l | sed 's#^\(0 9 .*daily_paper_task.sh\)#\# \1#' | crontab -
+  crontab -l | sed 's#^\(.*daily_paper_task.sh\)#\# \1#' | crontab -
   ```
-  (Or run `crontab -e` and put a `#` in front of the line.)
-- **Resume:** uncomment it (remove the leading `# `) via `crontab -e`.
-- **Stop entirely:** remove the line with `crontab -e`.
-- **Run once manually (costs API usage):**
+  (Or run `crontab -e` and put a `#` in front of each line.)
+- **Resume:** remove the leading `# ` from both lines via `crontab -e`.
+- **Stop entirely:** delete both lines with `crontab -e`.
+- **Run once manually (costs API usage, makes a real commit + push):**
   ```bash
   /bin/bash ~/ml-paper-daily/automation/daily_paper_task.sh
   ```
@@ -89,18 +97,21 @@ simplified, pass by pass.
   atomic `mkdir` lock.
 - The agent runs with a restricted tool allow-list (read/edit/write/grep, web
   search on new-paper days, and git/python/pytest/pip in Bash only).
-- Non-interactive `git push` works because `gh` is configured as the git
-  credential helper (`gh auth setup-git`).
+- Non-interactive `git push` works over **SSH**: `origin` is
+  `git@github.com:sohamkundu27/ml-paper-daily.git`, and the script exports
+  `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"`
+  so cron never blocks on a passphrase or host-key prompt. The SSH key at
+  `~/.ssh/id_ed25519` is already authorized on GitHub.
 
-## Platform notes (macOS)
+## Platform notes (Linux)
 
-- This machine is macOS, so cron is managed by **launchd** (there is no
-  `systemctl`). The `cron` daemon (`/usr/sbin/cron`) is active and picks up the
-  user crontab automatically.
-- If cron ever appears not to run, grant **Full Disk Access** to `/usr/sbin/cron`
-  in *System Settings → Privacy & Security*, which some macOS versions require
-  for cron jobs that touch user files.
-- Deviations from a generic Linux setup, made so the pipeline actually runs
-  here: `--max-turns` is omitted (unsupported by this CLI build; cost is bounded
-  by `--max-budget-usd` instead), and the tool allow-list includes `python3`/
-  `pip3` since macOS has no bare `python`/`pip`.
+- This machine is **Linux**; cron runs via the system `cron` daemon
+  (`systemctl is-active cron` → `active`), which picks up the user crontab
+  automatically. No launchd, no `gh`.
+- Cron runs with a **minimal `PATH`**, so the script prepends nvm's bin
+  (`/home/soham/.nvm/versions/node/v24.16.0/bin`) and resolves the `claude` CLI
+  by absolute path. If you upgrade Node via nvm, update that path (the script
+  tries `command -v claude` first, then falls back to it).
+- `--max-turns` is omitted (unsupported by this CLI build; cost is bounded by
+  `--max-budget-usd` instead). The tool allow-list authorizes both `python`/
+  `pip` and `python3`/`pip3` spellings for portability.
