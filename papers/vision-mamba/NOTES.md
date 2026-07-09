@@ -85,3 +85,34 @@ All tests pass. Model is runnable and gradients flow.
   10. Pass 1 vs Pass 2 output differences
   
 All tests pass. Gradients flow correctly. Model is ready for Pass 3 (classification head and training).
+
+### After Pass 3:
+- **Implemented:**
+  * `VisionMambaPass3`: Full model with classification head. Uses bidirectional selective SSM blocks like Pass 2, adds global average pooling over patches, then a linear classification head (embed_dim -> num_classes).
+  * Classification head: simple nn.Linear layer outputting logits for 10-way classification.
+  * Improved SSM initialization: A matrix initialized near-identity (0.9 * I + small noise) rather than pure noise. This provides numerical stability and better gradient flow.
+  * Training script `train_pass3.py`: Demonstrates full training pipeline on CIFAR-10 (small subset for demo). Includes:
+    - DataLoader setup for train/test splits
+    - Cross-entropy loss and Adam optimizer
+    - Per-epoch metrics (loss, accuracy) on both train and test sets
+    - Gradient clipping for stability
+    - Configurable hyperparameters (batch_size, learning_rate, num_epochs, subset_size)
+  * Model trains stably on toy data: loss decreases consistently over training steps (no NaN), gradients flow through entire model including classification head.
+
+- **Simplified/Stubbed:**
+  * Classification head is minimal (single linear layer) rather than more complex heads with MLPs or gating mechanisms.
+  * No data augmentation in training (just normalize to [-1, 1]).
+  * No learning rate scheduling, warmup, or other advanced training techniques.
+  * Training is on a small subset of CIFAR-10 (500 samples) for speed. Full dataset training would improve accuracy.
+  * Positional embeddings still use fixed sinusoidal encoding, not learned.
+  * SSM state is still computed sequentially step-by-step (no parallel scan optimization from real Mamba).
+
+**Tests:** `test_vision_mamba_pass3.py` includes 6 tests covering:
+  1. Output shape (batch, num_classes)
+  2. Different number of classes
+  3. Gradient flow through classification head
+  4. Stable training over multiple steps (no NaN, loss decreases)
+  5. Model learns on toy data (loss decreases over epochs)
+  6. Pass 2 backward compatibility (Pass 2 still works alongside Pass 3)
+
+All tests pass. Model trains stably without NaN loss. Backward compatibility maintained.

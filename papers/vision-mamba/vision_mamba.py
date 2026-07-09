@@ -101,8 +101,10 @@ class SelectiveSSMBlock(nn.Module):
         # Gate control: learns to selectively activate parts of the state space
         self.gate_proj = nn.Linear(embed_dim, hidden_dim)
 
-        # State transition matrix
-        self.A = nn.Parameter(torch.randn(hidden_dim, hidden_dim) * 0.1)
+        # State transition matrix: initialize as near-identity with small perturbation
+        # This helps stability: h_t ≈ h_{t-1} + input allows gradients to flow better
+        A_init = torch.eye(hidden_dim) * 0.9 + torch.randn(hidden_dim, hidden_dim) * 0.05
+        self.A = nn.Parameter(A_init)
 
         # Output projection back to embedding dimension
         self.out_proj = nn.Linear(hidden_dim, embed_dim)
@@ -243,3 +245,40 @@ class VisionMambaPass2(nn.Module):
 
         x = self.norm(x)  # Final layer norm
         return x  # (batch, num_patches, embed_dim)
+
+
+class VisionMambaPass3(nn.Module):
+    """Vision Mamba with classification head (pass 3)."""
+
+    def __init__(self, image_size=32, patch_size=4, in_channels=3,
+                 embed_dim=64, num_blocks=2, ssm_hidden_dim=128, num_classes=10):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.patcher = ImagePatcher(image_size, patch_size, in_channels, embed_dim)
+        num_patches = (image_size // patch_size) ** 2
+        self.pos_embed = PositionalEmbedding(num_patches, embed_dim)
+
+        # Use bidirectional selective SSM blocks
+        self.blocks = nn.ModuleList([
+            VisionMambaBlock(embed_dim, ssm_hidden_dim=ssm_hidden_dim, use_bidirectional=True)
+            for _ in range(num_blocks)
+        ])
+        self.norm = nn.LayerNorm(embed_dim)
+
+        # Classification head: global average pooling + linear layer
+        self.head = nn.Linear(embed_dim, num_classes)
+
+    def forward(self, x):
+        # x: (batch, channels, height, width)
+        x = self.patcher(x)  # (batch, num_patches, embed_dim)
+        x = self.pos_embed(x)  # Add positional embeddings
+
+        for block in self.blocks:
+            x = block(x)  # (batch, num_patches, embed_dim)
+
+        x = self.norm(x)  # Final layer norm
+        # Global average pooling over patches
+        x = x.mean(dim=1)  # (batch, embed_dim)
+        # Classification head
+        logits = self.head(x)  # (batch, num_classes)
+        return logits
