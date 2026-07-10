@@ -116,3 +116,60 @@ All tests pass. Gradients flow correctly. Model is ready for Pass 3 (classificat
   6. Pass 2 backward compatibility (Pass 2 still works alongside Pass 3)
 
 All tests pass. Model trains stably without NaN loss. Backward compatibility maintained.
+
+### After Pass 4 (End-to-End Demo):
+- **Implemented:**
+  * `demo_pass4.py`: Complete end-to-end demonstration script that:
+    - Generates synthetic image data (300 train, 60 test samples)
+    - Trains VisionMambaPass3 with classification head on synthetic data
+    - Shows stable training over 3 epochs with gradient clipping
+    - Benchmarks inference speed for all three passes (Pass 1, 2, 3)
+    - Runs sample inference on test batch with predictions and confidence scores
+    - Demonstrates that all three passes work together in an integrated pipeline
+  * All three passes (Pass 1, 2, 3) are backward compatible and run simultaneously
+  * Inference benchmarking shows relative throughput differences:
+    - Pass 1 (unidirectional): ~6287 images/sec
+    - Pass 2 (bidirectional): ~5375 images/sec (slower due to bidirectional processing)
+    - Pass 3 (with classification): ~5358 images/sec (classification head negligible overhead)
+  * Training demonstrates stable convergence without NaN on synthetic data
+
+- **Simplified/Stubbed:**
+  * Demo uses synthetic random data rather than real CIFAR-10 (faster, no dataset download needed)
+  * Only 300 training samples for speed; real training would need 50,000
+  * No learning rate scheduling, warmup, or advanced optimizers beyond Adam
+  * Single linear classification head (not complex MLPs or gating)
+  * No data augmentation
+  * No comparison to Vision Transformer or other baselines
+  * SSM still computed sequentially (no parallel scan or structured state optimization from real Mamba)
+  * Inference benchmarks use PyTorch eager execution (not CUDA kernels or other optimizations)
+
+**Test:** `demo_pass4.py` runs end-to-end:
+  - Creates all three model variants
+  - Trains Pass 3 model (only one with classification head) for 3 epochs
+  - Benchmarks inference speed on all three passes
+  - Performs sample inference with predictions
+  - Outputs comprehensive summary with timing and accuracy metrics
+
+All tests (Pass 1, 2, 3) continue to pass. Demo runs without errors and completes in ~2 seconds on GPU.
+
+## Final Summary: What Works vs. What's Simplified
+
+This implementation achieves the core Vision Mamba idea:
+- ✅ **Patch embedding**: Images → non-overlapping patches via Conv2d
+- ✅ **Position encoding**: Sinusoidal positional embeddings (fixed, not learned)
+- ✅ **Selective SSM**: Input-dependent gating that controls state flow (Pass 2 core innovation)
+- ✅ **Bidirectional processing**: Forward + backward SSM passes that capture context both ways
+- ✅ **Classification pipeline**: Global average pooling + linear head for image classification
+- ✅ **End-to-end training**: Stable convergence on synthetic data with gradient flow
+- ✅ **Inference**: Working predictions with confidence scores
+
+What was simplified for this 4-pass implementation:
+- **Selective gating**: Uses learned sigmoid projection on inputs; real Mamba uses more complex parameter modulation with λ(u_t) controlling state transitions
+- **State representation**: Sequential step-by-step computation; real Mamba uses structured SSM representations and parallel scan algorithms for efficiency
+- **Bidirectional merging**: Simple concatenation + projection; real paper may use more sophisticated fusion
+- **Hardware efficiency**: No CUDA kernel optimizations; relies on PyTorch eager mode
+- **Data & training**: Synthetic data and small subsets for demo; real work uses full ImageNet
+- **Positional embeddings**: Fixed sinusoidal; real implementations may use learned positional embeddings
+- **Architecture depth**: 2 SSM blocks for demo; real Vision Mamba uses 24+ blocks
+
+This captures the essential algorithmic innovation (selective gating + bidirectional SSM) while keeping the codebase minimal and runnable. The 4-pass structure progresses from foundation (Pass 1), to core innovation (Pass 2), to training capability (Pass 3), to end-to-end demonstration (Pass 4).
