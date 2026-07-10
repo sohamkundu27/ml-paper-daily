@@ -1,0 +1,35 @@
+# Diffusion-Driven State Space Models
+
+**Paper:** Diffusion-Driven State Space Models  
+**arXiv:** https://arxiv.org/abs/2606.21036  
+**Published:** June 2026 (ProbML 2026)  
+**Authors:** Jack Ruder and collaborators
+
+## Summary
+
+Traditional latent state space models assume a fixed, parametric transition distribution (usually Gaussian). This paper replaces that rigid assumption by using a diffusion model to learn the transition density directly from data. Rather than the common two-stage approach of first training an autoencoder then a separate diffusion model, this method jointly learns the state dynamics and observation process, allowing the diffusion model to capture complex, non-Gaussian transitions between latent states.
+
+## Plan: 4 passes
+
+**Pass 1:** Foundational components — implement a basic linear state space model with Gaussian transitions, plus a minimal diffusion process (forward/reverse) to become familiar with the diffusion mechanics.
+
+**Pass 2:** Replace the Gaussian transition with a learned diffusion model; implement training loop that jointly learns both the state transitions and observation model via score matching.
+
+**Pass 3:** Add multi-step inference for longer sequences; implement proper likelihood estimation and evaluation on a simple synthetic time-series task.
+
+**Pass 4:** End-to-end demo on toy data (e.g., damped oscillator or Lorenz system), with a final honest summary of what worked and what was simplified.
+
+## Implemented vs. simplified
+
+### Pass 1 (completed)
+
+**Implemented:**
+- `LinearSSM`: A basic linear Gaussian state space model with learnable transition matrix A, observation matrix C, and fixed noise covariances Q, R. Can sample full trajectories.
+- `DiffusionProcess`: A minimal diffusion process with linear noise schedule. Implements forward diffusion q(x_t | x_0) using cumulative alphas, and a simplified reverse step that estimates x_{t-1} from x_t and predicted noise.
+- Complete test suite: trajectory generation, forward diffusion at various t, reverse steps, and a basic end-to-end cycle.
+
+**Simplified/Stubbed:**
+- Reverse step is not a proper Gaussian posterior; it's a simplified approximation that reweights x_0 estimate and current x_t (good for testing, not for actual denoising).
+- No neural network component yet; all matrices are constant.
+- No training loop; this is inference-only demonstration.
+- No likelihood estimation or learning objective yet.
