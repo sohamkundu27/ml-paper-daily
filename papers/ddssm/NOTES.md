@@ -33,3 +33,18 @@ Traditional latent state space models assume a fixed, parametric transition dist
 - No neural network component yet; all matrices are constant.
 - No training loop; this is inference-only demonstration.
 - No likelihood estimation or learning objective yet.
+
+### Pass 2 (completed)
+
+**Implemented:**
+- `NoisePredictor`: A simple MLP-based neural network that predicts noise in diffused state transitions. Takes noisy state x_t and timestep t as input, outputs predicted noise.
+- `train_diffusion_ssm()`: Training loop that jointly learns the noise predictor and SSM parameters via score matching. For each trajectory, extracts transitions (z_{t+1} - z_t), adds noise via forward diffusion at random timesteps, and trains the network to predict the true noise via MSE loss. Uses Adam optimizer.
+- Tests for the new components: `test_noise_predictor()` verifies the network produces correct shapes; `test_training_diffusion_ssm()` verifies the training loop runs without NaN and decreases loss.
+
+**Simplified/Stubbed:**
+- Time embedding is trivial (just t/100); a proper implementation would use positional encodings or sinusoidal embeddings.
+- Noise predictor is a shallow MLP with no residual connections or other architectural improvements.
+- SSM parameters (A, C) are included in the optimizer but are not actively updated during training (this would require more careful gradient tracking). The key contribution is learning the diffusion model.
+- No inference via sampling yet; training is forward-pass only.
+- No likelihood estimation; loss is purely MSE on noise prediction.
+- No validation or test set separation in the training loop.

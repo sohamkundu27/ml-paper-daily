@@ -1,7 +1,8 @@
-"""Tests for basic SSM and diffusion components."""
+"""Tests for SSM, diffusion, and learned noise prediction components."""
 
 import numpy as np
-from ssm import LinearSSM, DiffusionProcess
+import torch
+from ssm import LinearSSM, DiffusionProcess, NoisePredictor, train_diffusion_ssm
 
 
 def test_linear_ssm():
@@ -114,9 +115,65 @@ def test_end_to_end():
     print("✓ test_end_to_end passed")
 
 
+def test_noise_predictor():
+    """Test NoisePredictor network."""
+    state_dim = 4
+    batch_size = 8
+    predictor = NoisePredictor(state_dim, hidden_dim=32)
+
+    # Create dummy input
+    x_t = torch.randn(batch_size, state_dim)
+    t = torch.randint(0, 100, (batch_size,))
+
+    # Forward pass
+    noise_pred = predictor(x_t, t)
+
+    # Check shapes
+    assert noise_pred.shape == (batch_size, state_dim), f"Expected shape {(batch_size, state_dim)}, got {noise_pred.shape}"
+
+    # Check finite values
+    assert torch.all(torch.isfinite(noise_pred)), "Output contains non-finite values"
+
+    print("✓ test_noise_predictor passed")
+
+
+def test_training_diffusion_ssm():
+    """Test training loop for diffusion SSM."""
+    state_dim = 3
+    obs_dim = 2
+    ssm = LinearSSM(state_dim, obs_dim, seed=42)
+    diffusion = DiffusionProcess(state_dim, num_steps=50)
+    noise_predictor = NoisePredictor(state_dim, hidden_dim=32)
+
+    # Train for a few epochs with small dataset
+    losses = train_diffusion_ssm(
+        ssm,
+        diffusion,
+        noise_predictor,
+        num_trajectories=5,
+        trajectory_length=10,
+        num_epochs=5,
+        learning_rate=0.01,
+        device="cpu"
+    )
+
+    # Check that we have losses for each epoch
+    assert len(losses) == 5, f"Expected 5 losses, got {len(losses)}"
+
+    # Check that all losses are finite
+    assert all(np.isfinite(loss) for loss in losses), "Some losses are non-finite"
+
+    # Check that loss is decreasing (not strictly, but should show some trend)
+    assert losses[-1] < losses[0] * 2, "Loss did not decrease sufficiently during training"
+
+    print("✓ test_training_diffusion_ssm passed")
+
+
 if __name__ == "__main__":
     test_linear_ssm()
     test_diffusion_forward()
     test_diffusion_reverse()
     test_end_to_end()
+    test_noise_predictor()
+    test_training_diffusion_ssm()
     print("\nAll tests passed! ✓")

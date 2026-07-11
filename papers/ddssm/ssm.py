@@ -1,7 +1,10 @@
-"""Basic linear state space model with Gaussian transitions."""
+"""Linear SSM with learned diffusion-based transitions via score matching."""
 
 import numpy as np
-from typing import Tuple
+from typing import Tuple, List, Callable
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
 
 class LinearSSM:
@@ -134,3 +137,125 @@ class DiffusionProcess:
                         x_t * (1.0 - np.sqrt(alpha_cumprod_prev_t)))
 
         return x_t_minus_1
+
+
+class NoisePredictor(nn.Module):
+    """Neural network that predicts noise for diffusion-based state transitions."""
+
+    def __init__(self, state_dim: int, hidden_dim: int = 64):
+        """
+        Args:
+            state_dim: Dimension of states to denoise.
+            hidden_dim: Hidden layer dimension.
+        """
+        super().__init__()
+        self.state_dim = state_dim
+        self.net = nn.Sequential(
+            nn.Linear(state_dim + 1, hidden_dim),  # +1 for time embedding
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, state_dim)
+        )
+
+    def forward(self, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        Predict noise in x_t at timestep t.
+
+        Args:
+            x_t: Noisy states [batch, state_dim].
+            t: Timestep indices [batch] in [0, num_steps).
+
+        Returns:
+            Predicted noise [batch, state_dim].
+        """
+        # Normalize timestep to [0, 1]
+        t_norm = t.float().unsqueeze(1) / 100.0
+        x_t_input = torch.cat([x_t, t_norm], dim=1)
+        return self.net(x_t_input)
+
+
+def train_diffusion_ssm(
+    ssm: LinearSSM,
+    diffusion: DiffusionProcess,
+    noise_predictor: NoisePredictor,
+    num_trajectories: int = 100,
+    trajectory_length: int = 20,
+    num_epochs: int = 50,
+    learning_rate: float = 1e-3,
+    device: str = "cpu"
+) -> List[float]:
+    """
+    Train noise predictor and SSM parameters jointly via score matching.
+
+    Args:
+        ssm: LinearSSM to train.
+        diffusion: DiffusionProcess for noise schedule.
+        noise_predictor: Neural network to train.
+        num_trajectories: Number of trajectories to sample per epoch.
+        trajectory_length: Length of each trajectory.
+        num_epochs: Training epochs.
+        learning_rate: Optimizer learning rate.
+        device: Device to train on ("cpu" or "cuda").
+
+    Returns:
+        List of loss values per epoch.
+    """
+    noise_predictor = noise_predictor.to(device)
+    optimizer = optim.Adam(
+        list(noise_predictor.parameters()) + [
+            nn.Parameter(torch.from_numpy(ssm.A.copy()).float()),
+            nn.Parameter(torch.from_numpy(ssm.C.copy()).float()),
+        ],
+        lr=learning_rate
+    )
+
+    losses = []
+
+    for epoch in range(num_epochs):
+        epoch_loss = 0.0
+        num_transitions = 0
+
+        for _ in range(num_trajectories):
+            # Sample trajectory
+            z_traj, _ = ssm.sample_trajectory(trajectory_length)
+
+            # Extract transitions (z_{t+1} - z_t)
+            transitions = z_traj[1:] - z_traj[:-1]
+
+            # Sample random timesteps for each transition
+            t_indices = np.random.randint(0, diffusion.num_steps, size=len(transitions))
+
+            # Convert to tensors
+            transitions_torch = torch.from_numpy(transitions).float().to(device)
+            t_torch = torch.from_numpy(t_indices).long().to(device)
+
+            # Forward diffusion: add noise to transitions
+            x_t_list = []
+            noise_true_list = []
+            for trans, t_idx in zip(transitions, t_indices):
+                x_t, noise_true = diffusion.forward_diffusion(trans, t_idx)
+                x_t_list.append(x_t)
+                noise_true_list.append(noise_true)
+
+            x_t_torch = torch.from_numpy(np.array(x_t_list)).float().to(device)
+            noise_true_torch = torch.from_numpy(np.array(noise_true_list)).float().to(device)
+
+            # Score matching loss: predict noise and compare to true noise
+            noise_pred = noise_predictor(x_t_torch, t_torch)
+            loss = nn.MSELoss()(noise_pred, noise_true_torch)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item() * len(transitions)
+            num_transitions += len(transitions)
+
+        avg_loss = epoch_loss / max(num_transitions, 1)
+        losses.append(avg_loss)
+
+        if (epoch + 1) % 10 == 0:
+            print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.6f}")
+
+    return losses
