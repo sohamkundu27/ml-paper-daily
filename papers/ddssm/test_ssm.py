@@ -4,7 +4,9 @@ import numpy as np
 import torch
 from ssm import (
     LinearSSM, DiffusionProcess, NoisePredictor, train_diffusion_ssm,
-    generate_sequence, estimate_likelihood, evaluate_on_synthetic_data
+    generate_sequence, estimate_likelihood, evaluate_on_synthetic_data,
+    DampedOscillator, LorenzSystem, demo_damped_oscillator, demo_lorenz_system,
+    run_pass_4_demo
 )
 
 
@@ -272,6 +274,85 @@ def test_evaluate_on_synthetic_data():
     print(f"  Test trajectory MSE: {results['test_trajectory_mse']:.6f}")
 
 
+def test_damped_oscillator():
+    """Test damped oscillator trajectory generation."""
+    oscillator = DampedOscillator(gamma=0.1, omega=1.0, seed=42)
+    T = 30
+    z, y = oscillator.sample_trajectory(T)
+
+    # Check shapes
+    assert z.shape == (T, 2), f"Expected z shape {(T, 2)}, got {z.shape}"
+    assert y.shape == (T, 1), f"Expected y shape {(T, 1)}, got {y.shape}"
+
+    # Check finite values
+    assert np.all(np.isfinite(z)), "z contains non-finite values"
+    assert np.all(np.isfinite(y)), "y contains non-finite values"
+
+    # Check that trajectory is bounded (damped oscillator should not explode)
+    assert np.all(np.abs(z) < 100), "Oscillator trajectory exploded"
+
+    print("✓ test_damped_oscillator passed")
+
+
+def test_lorenz_system():
+    """Test Lorenz system trajectory generation."""
+    lorenz = LorenzSystem(sigma=10.0, rho=28.0, beta=8.0/3.0, seed=42)
+    T = 100
+    z, y = lorenz.sample_trajectory(T)
+
+    # Check shapes
+    assert z.shape == (T, 3), f"Expected z shape {(T, 3)}, got {z.shape}"
+    assert y.shape == (T, 2), f"Expected y shape {(T, 2)}, got {y.shape}"
+
+    # Check finite values
+    assert np.all(np.isfinite(z)), "z contains non-finite values"
+    assert np.all(np.isfinite(y)), "y contains non-finite values"
+
+    print("✓ test_lorenz_system passed")
+
+
+def test_demo_damped_oscillator():
+    """Test damped oscillator demo (quick version)."""
+    results = demo_damped_oscillator(
+        num_trajectories=5, seq_length=20,
+        num_epochs=5, device="cpu"
+    )
+
+    # Check results contain expected keys
+    assert "system" in results
+    assert "final_loss" in results
+    assert "gen_mse" in results
+    assert "nll" in results
+
+    # Check all values are finite
+    for key, val in results.items():
+        if isinstance(val, (int, float)) and key != "system":
+            assert np.isfinite(val), f"{key} is not finite: {val}"
+
+    print("✓ test_demo_damped_oscillator passed")
+
+
+def test_demo_lorenz_system():
+    """Test Lorenz demo (quick version)."""
+    results = demo_lorenz_system(
+        num_trajectories=5, seq_length=30,
+        num_epochs=5, device="cpu"
+    )
+
+    # Check results contain expected keys
+    assert "system" in results
+    assert "final_loss" in results
+    assert "gen_mse" in results
+    assert "nll" in results
+
+    # Check all values are finite
+    for key, val in results.items():
+        if isinstance(val, (int, float)) and key != "system":
+            assert np.isfinite(val), f"{key} is not finite: {val}"
+
+    print("✓ test_demo_lorenz_system passed")
+
+
 if __name__ == "__main__":
     test_linear_ssm()
     test_diffusion_forward()
@@ -282,4 +363,8 @@ if __name__ == "__main__":
     test_generate_sequence()
     test_estimate_likelihood()
     test_evaluate_on_synthetic_data()
+    test_damped_oscillator()
+    test_lorenz_system()
+    test_demo_damped_oscillator()
+    test_demo_lorenz_system()
     print("\nAll tests passed! ✓")

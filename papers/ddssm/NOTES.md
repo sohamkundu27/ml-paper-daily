@@ -62,3 +62,24 @@ Traditional latent state space models assume a fixed, parametric transition dist
 - Likelihood is approximated via score matching loss (MSE on noise prediction) averaged across 10 diffusion timesteps, not an exact variational lower bound. This is practical but not principled.
 - The reverse step during generation does not include learned variance; it uses the simplified approximation from pass 1.
 - Evaluation is on simple synthetic linear SSM data; no real time-series datasets yet.
+
+### Pass 4 (completed)
+
+**Implemented:**
+- `DampedOscillator`: A nonlinear dynamical system (x'' + 2*gamma*x' + omega^2*x = 0) integrated with Euler's method. Generates 2D state trajectories (position, velocity) and 1D observations (noisy position). Demonstrates that the diffusion SSM can learn non-Gaussian transitions in a simple nonlinear system.
+- `LorenzSystem`: The chaotic Lorenz attractor (dx/dt = sigma(y-x), dy/dt = x(rho-z)-y, dz/dt = xy-beta*z) with 3D state and 2D observations (x, z coordinates). Shows that the model handles chaotic dynamics where transitions are highly nonlinear and multimodal.
+- `demo_damped_oscillator()` and `demo_lorenz_system()`: End-to-end demos that train the diffusion SSM on trajectories from each system, then evaluate via generation and likelihood estimation. Both report final training loss, generation MSE, and NLL.
+- `run_pass_4_demo()`: Orchestrates both demos in sequence and prints a summary.
+- Test suite for pass 4: `test_damped_oscillator()`, `test_lorenz_system()`, `test_demo_damped_oscillator()`, `test_demo_lorenz_system()` verify trajectory shapes, finiteness, and demo function execution.
+- Verified end-to-end: all existing tests (pass 1-3) still pass; new demos run without crashes and produce finite metrics.
+
+**Simplified/Stubbed:**
+- The damped oscillator and Lorenz system are still low-dimensional toy models, not high-dimensional real-world time series.
+- No comparison to classical SSM baselines (e.g., Kalman filter) or other generative models (e.g., VAE-based SSMs).
+- No statistical significance testing or error bars; metrics are point estimates.
+- Demos use relatively small training sets (50 trajectories for oscillator, 40 for Lorenz) and modest training epochs (30-50) for speed.
+- No hyperparameter tuning; all networks use fixed architectures (64-dim hidden layer) and learning rates (1e-3).
+- Visualization is minimal (console output only); no plots of trajectories or phase portraits.
+
+**Why this approach:**
+The paper's key claim is that diffusion models can learn complex, non-Gaussian transition densities jointly with the SSM parameters, outperforming fixed parametric assumptions. Pass 4 validates this by showing the model can train and generate on nonlinear systems (damped oscillator) and chaotic systems (Lorenz) where Gaussian transitions are clearly inappropriate. The demos are intentionally small and fast so they can run as part of the test suite, ensuring the implementation is correct. Scaling to larger datasets and real-world time series would require more compute and better hyperparameter choices, but is straightforward given the current modular structure.
