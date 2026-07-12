@@ -2,7 +2,10 @@
 
 import numpy as np
 import torch
-from ssm import LinearSSM, DiffusionProcess, NoisePredictor, train_diffusion_ssm
+from ssm import (
+    LinearSSM, DiffusionProcess, NoisePredictor, train_diffusion_ssm,
+    generate_sequence, estimate_likelihood, evaluate_on_synthetic_data
+)
 
 
 def test_linear_ssm():
@@ -169,6 +172,106 @@ def test_training_diffusion_ssm():
     print("✓ test_training_diffusion_ssm passed")
 
 
+def test_generate_sequence():
+    """Test multi-step sequence generation via diffusion inference."""
+    state_dim = 3
+    obs_dim = 2
+    ssm = LinearSSM(state_dim, obs_dim, seed=42)
+    diffusion = DiffusionProcess(state_dim, num_steps=50)
+    noise_predictor = NoisePredictor(state_dim, hidden_dim=32)
+
+    # Train quickly
+    train_diffusion_ssm(
+        ssm, diffusion, noise_predictor,
+        num_trajectories=3,
+        trajectory_length=8,
+        num_epochs=3,
+        learning_rate=0.01,
+        device="cpu"
+    )
+
+    # Generate a sequence
+    z0 = np.random.randn(state_dim)
+    seq_length = 10
+    z_seq, y_seq = generate_sequence(
+        ssm, diffusion, noise_predictor,
+        z0, seq_length,
+        num_diffusion_steps=15,
+        device="cpu"
+    )
+
+    # Check shapes
+    assert z_seq.shape == (seq_length, state_dim), f"Expected z_seq shape {(seq_length, state_dim)}, got {z_seq.shape}"
+    assert y_seq.shape == (seq_length, obs_dim), f"Expected y_seq shape {(seq_length, obs_dim)}, got {y_seq.shape}"
+
+    # Check finite values
+    assert np.all(np.isfinite(z_seq)), "z_seq contains non-finite values"
+    assert np.all(np.isfinite(y_seq)), "y_seq contains non-finite values"
+
+    # Check that first state is close to z0
+    assert np.allclose(z_seq[0], z0), "First generated state should match z0"
+
+    print("✓ test_generate_sequence passed")
+
+
+def test_estimate_likelihood():
+    """Test likelihood estimation on state trajectories."""
+    state_dim = 3
+    obs_dim = 2
+    ssm = LinearSSM(state_dim, obs_dim, seed=42)
+    diffusion = DiffusionProcess(state_dim, num_steps=50)
+    noise_predictor = NoisePredictor(state_dim, hidden_dim=32)
+
+    # Train quickly
+    train_diffusion_ssm(
+        ssm, diffusion, noise_predictor,
+        num_trajectories=3,
+        trajectory_length=8,
+        num_epochs=3,
+        learning_rate=0.01,
+        device="cpu"
+    )
+
+    # Sample a trajectory and estimate likelihood
+    z_traj, _ = ssm.sample_trajectory(10)
+    nll = estimate_likelihood(ssm, diffusion, noise_predictor, z_traj, device="cpu")
+
+    # Check that NLL is finite and positive
+    assert np.isfinite(nll), f"NLL is not finite: {nll}"
+    assert nll >= 0, f"NLL should be non-negative, got {nll}"
+
+    print(f"✓ test_estimate_likelihood passed (NLL={nll:.4f})")
+
+
+def test_evaluate_on_synthetic_data():
+    """Test end-to-end evaluation on synthetic data."""
+    results = evaluate_on_synthetic_data(
+        state_dim=2,
+        obs_dim=1,
+        seq_length=10,
+        num_train=5,
+        num_test=3,
+        num_epochs=5,
+        device="cpu"
+    )
+
+    # Check all metrics are present and finite
+    assert "train_loss" in results, "Missing train_loss in results"
+    assert "test_nll" in results, "Missing test_nll in results"
+    assert "test_mse" in results, "Missing test_mse in results"
+    assert "test_trajectory_mse" in results, "Missing test_trajectory_mse in results"
+
+    for key, value in results.items():
+        assert np.isfinite(value), f"{key} is not finite: {value}"
+        assert value >= 0, f"{key} should be non-negative, got {value}"
+
+    print(f"✓ test_evaluate_on_synthetic_data passed")
+    print(f"  Train loss: {results['train_loss']:.6f}")
+    print(f"  Test NLL: {results['test_nll']:.6f}")
+    print(f"  Test MSE: {results['test_mse']:.6f}")
+    print(f"  Test trajectory MSE: {results['test_trajectory_mse']:.6f}")
+
+
 if __name__ == "__main__":
     test_linear_ssm()
     test_diffusion_forward()
@@ -176,4 +279,7 @@ if __name__ == "__main__":
     test_end_to_end()
     test_noise_predictor()
     test_training_diffusion_ssm()
+    test_generate_sequence()
+    test_estimate_likelihood()
+    test_evaluate_on_synthetic_data()
     print("\nAll tests passed! ✓")

@@ -48,3 +48,17 @@ Traditional latent state space models assume a fixed, parametric transition dist
 - No inference via sampling yet; training is forward-pass only.
 - No likelihood estimation; loss is purely MSE on noise prediction.
 - No validation or test set separation in the training loop.
+
+### Pass 3 (completed)
+
+**Implemented:**
+- `generate_sequence()`: Multi-step inference for generating long sequences. Starts with an initial latent state and iteratively samples the next transition using the trained noise predictor via reverse diffusion. Uses a deterministic schedule to map generation steps to the diffusion timesteps. Generates both latent states (z_seq) and observations (y_seq).
+- `estimate_likelihood()`: Likelihood estimation for state trajectories using score matching. Evaluates the model at multiple diffusion timesteps and computes the average MSE between predicted and true noise. Returns negative log-likelihood estimate (lower is better). Used for model evaluation.
+- `evaluate_on_synthetic_data()`: End-to-end evaluation on synthetic data generated from a linear SSM. Trains the model on synthetic trajectories, then evaluates on held-out test data. Computes metrics: final training loss, test negative log-likelihood, test observation MSE, and test state trajectory MSE.
+- Comprehensive test suite for pass 3 components: `test_generate_sequence()` verifies sequence generation shapes and finiteness; `test_estimate_likelihood()` verifies NLL computation; `test_evaluate_on_synthetic_data()` verifies the full evaluation pipeline.
+
+**Simplified/Stubbed:**
+- Sequence generation uses a fixed deterministic reverse schedule (20 steps by default) rather than a more sophisticated sampling strategy like DDIM or adaptive step selection.
+- Likelihood is approximated via score matching loss (MSE on noise prediction) averaged across 10 diffusion timesteps, not an exact variational lower bound. This is practical but not principled.
+- The reverse step during generation does not include learned variance; it uses the simplified approximation from pass 1.
+- Evaluation is on simple synthetic linear SSM data; no real time-series datasets yet.

@@ -259,3 +259,204 @@ def train_diffusion_ssm(
             print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.6f}")
 
     return losses
+
+
+def generate_sequence(
+    ssm: LinearSSM,
+    diffusion: DiffusionProcess,
+    noise_predictor: NoisePredictor,
+    z0: np.ndarray,
+    seq_length: int,
+    num_diffusion_steps: int = 20,
+    device: str = "cpu"
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Generate a sequence of latent states and observations using multi-step diffusion inference.
+
+    Args:
+        ssm: The linear SSM model.
+        diffusion: DiffusionProcess for reverse sampling.
+        noise_predictor: Trained noise predictor network.
+        z0: Initial latent state [state_dim].
+        seq_length: Length of sequence to generate.
+        num_diffusion_steps: Number of reverse steps per transition (deterministic schedule).
+        device: Device to run inference on.
+
+    Returns:
+        (z_seq, y_seq) where z_seq is [seq_length, state_dim] and y_seq is [seq_length, obs_dim].
+    """
+    noise_predictor.eval()
+    z_seq = [z0]
+    y_seq = []
+
+    z_current = z0.copy()
+
+    with torch.no_grad():
+        for _ in range(seq_length - 1):
+            # Start from pure noise for the transition
+            trans_current = np.random.randn(ssm.state_dim)
+
+            # Reverse diffusion: iteratively denoise the transition
+            for step in range(num_diffusion_steps - 1, -1, -1):
+                # Map [0, num_diffusion_steps) to [0, diffusion.num_steps)
+                diffusion_t = int(step * diffusion.num_steps / num_diffusion_steps)
+                diffusion_t = min(diffusion_t, diffusion.num_steps - 1)
+
+                # Predict noise at this diffusion timestep
+                trans_tensor = torch.from_numpy(trans_current).float().to(device).unsqueeze(0)
+                t_tensor = torch.tensor([diffusion_t], dtype=torch.long).to(device)
+                noise_pred = noise_predictor(trans_tensor, t_tensor).squeeze(0).cpu().numpy()
+
+                # Reverse step
+                trans_current = diffusion.reverse_step(trans_current, diffusion_t, noise_pred)
+
+            # Update state: z_{t+1} = z_t + transition
+            z_next = z_current + trans_current
+            z_seq.append(z_next)
+
+            # Generate observation: y_t = C @ z_t + noise
+            y_t = ssm.C @ z_current + np.random.randn(ssm.obs_dim) * np.sqrt(np.diag(ssm.R))
+            y_seq.append(y_t)
+
+            z_current = z_next
+
+        # Observation for final state
+        y_final = ssm.C @ z_current + np.random.randn(ssm.obs_dim) * np.sqrt(np.diag(ssm.R))
+        y_seq.insert(0, ssm.C @ z0 + np.random.randn(ssm.obs_dim) * np.sqrt(np.diag(ssm.R)))
+
+    return np.array(z_seq), np.array(y_seq)
+
+
+def estimate_likelihood(
+    ssm: LinearSSM,
+    diffusion: DiffusionProcess,
+    noise_predictor: NoisePredictor,
+    z_trajectory: np.ndarray,
+    device: str = "cpu"
+) -> float:
+    """
+    Estimate log-likelihood of state transitions using diffusion-based score matching.
+    Uses the expected squared error between predicted and true noise across all timesteps.
+
+    Args:
+        ssm: The SSM model.
+        diffusion: DiffusionProcess for noise schedule.
+        noise_predictor: Trained noise predictor network.
+        z_trajectory: State trajectory [T, state_dim].
+        device: Device to run inference on.
+
+    Returns:
+        Negative log-likelihood estimate (lower is better). Uses MSE averaged over diffusion steps.
+    """
+    noise_predictor.eval()
+    transitions = z_trajectory[1:] - z_trajectory[:-1]
+
+    if len(transitions) == 0:
+        return 0.0
+
+    # Compute score matching loss at multiple timesteps and average
+    total_loss = 0.0
+    num_steps_to_eval = min(10, diffusion.num_steps)  # Evaluate at 10 representative timesteps
+    step_indices = np.linspace(0, diffusion.num_steps - 1, num_steps_to_eval, dtype=int)
+
+    with torch.no_grad():
+        for trans in transitions:
+            trans_loss = 0.0
+            for t_idx in step_indices:
+                # Forward diffusion
+                x_t, noise_true = diffusion.forward_diffusion(trans, int(t_idx))
+
+                # Predict noise
+                x_t_tensor = torch.from_numpy(x_t).float().to(device).unsqueeze(0)
+                t_tensor = torch.tensor([int(t_idx)], dtype=torch.long).to(device)
+                noise_pred = noise_predictor(x_t_tensor, t_tensor).squeeze(0).cpu().numpy()
+
+                # MSE between predicted and true noise
+                mse = np.mean((noise_pred - noise_true) ** 2)
+                trans_loss += mse
+
+            total_loss += trans_loss / len(step_indices)
+
+    # Average negative log-likelihood across transitions
+    nll = total_loss / len(transitions)
+    return float(nll)
+
+
+def evaluate_on_synthetic_data(
+    state_dim: int = 3,
+    obs_dim: int = 2,
+    seq_length: int = 20,
+    num_train: int = 50,
+    num_test: int = 10,
+    num_epochs: int = 30,
+    device: str = "cpu"
+) -> dict:
+    """
+    Evaluate the diffusion SSM on synthetic data from a linear SSM.
+
+    Args:
+        state_dim: Latent state dimension.
+        obs_dim: Observation dimension.
+        seq_length: Length of trajectories.
+        num_train: Number of training trajectories.
+        num_test: Number of test trajectories.
+        num_epochs: Training epochs.
+        device: Device to use.
+
+    Returns:
+        Dictionary with 'train_loss', 'test_nll', 'test_mse', and 'test_trajectory_mse'.
+    """
+    # Create SSM and diffusion model
+    ssm = LinearSSM(state_dim, obs_dim, seed=42)
+    diffusion = DiffusionProcess(state_dim, num_steps=50)
+    noise_predictor = NoisePredictor(state_dim, hidden_dim=32)
+
+    # Train the model
+    print("Training diffusion SSM on synthetic data...")
+    train_losses = train_diffusion_ssm(
+        ssm, diffusion, noise_predictor,
+        num_trajectories=num_train,
+        trajectory_length=seq_length,
+        num_epochs=num_epochs,
+        learning_rate=1e-3,
+        device=device
+    )
+
+    # Evaluate on test data
+    print("\nEvaluating on test data...")
+    test_nlls = []
+    test_mses = []
+    trajectory_mses = []
+
+    for _ in range(num_test):
+        # Sample ground truth trajectory
+        z_true, y_true = ssm.sample_trajectory(seq_length)
+
+        # Estimate likelihood
+        nll = estimate_likelihood(ssm, diffusion, noise_predictor, z_true, device=device)
+        test_nlls.append(nll)
+
+        # Generate a sequence from the model
+        z_gen, y_gen = generate_sequence(
+            ssm, diffusion, noise_predictor,
+            z_true[0], seq_length,
+            num_diffusion_steps=20,
+            device=device
+        )
+
+        # Observation reconstruction error
+        obs_mse = np.mean((y_gen - y_true) ** 2)
+        test_mses.append(obs_mse)
+
+        # State reconstruction error (generative)
+        traj_mse = np.mean((z_gen - z_true) ** 2)
+        trajectory_mses.append(traj_mse)
+
+    results = {
+        "train_loss": train_losses[-1],
+        "test_nll": np.mean(test_nlls),
+        "test_mse": np.mean(test_mses),
+        "test_trajectory_mse": np.mean(trajectory_mses),
+    }
+
+    return results
