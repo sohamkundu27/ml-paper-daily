@@ -41,3 +41,23 @@ Instead of using fixed activation functions in neural networks, Kolmogorov-Arnol
 - No L1 regularization for inducing sparsity as suggested by the paper
 
 These simplifications allow for a clean, minimal implementation that demonstrates the core idea (learnable univariate functions on edges) while remaining easy to understand and efficient to train on toy problems.
+
+**Pass 2 - What is implemented:**
+
+- A `KANNetwork` module that composes multiple `KANLayer`s into a full network with arbitrary depth
+- Optional ReLU activation functions between layers for nonlinearity
+- Grid refinement mechanism: `refine_grid()` method that increases the number of basis functions (grid size) and interpolates existing control points onto the finer grid using linear interpolation
+- Full differentiable forward pass through multi-layer networks, verified with gradient flow tests
+- Network can successfully learn complex nonlinear functions (e.g., x²) through multiple layers
+- Helper method `get_grid_info()` to introspect network configuration
+
+**Pass 2 - What is simplified/stubbed:**
+
+- Grid refinement uses simple linear interpolation rather than a more sophisticated resampling scheme
+- Does not implement the paper's full B-spline degree adaptation; degree parameter is not used
+- No learnable per-edge activation functions; only uses standard ReLU between layers
+- No adaptive refinement based on approximation error; refinement is manual via `refine_grid()` call
+- No comparison against the paper's full differentiable pruning mechanism
+- Grid is still uniformly spaced; no non-uniform grid adaptation
+
+The network is now ready for end-to-end training and can solve multi-layer function approximation tasks. Pass 3 will implement a concrete classifier/regressor on toy data.

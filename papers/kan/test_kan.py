@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from kan_layer import KANLayer
+from kan_network import KANNetwork
 
 
 def test_kan_forward():
@@ -127,6 +128,113 @@ def test_kan_multi_feature():
     print("✓ Multi-feature learning test passed")
 
 
+def test_kan_network_forward():
+    """Test KANNetwork forward pass with multiple layers."""
+    batch_size = 4
+    layer_sizes = [2, 4, 3, 1]
+
+    network = KANNetwork(layer_sizes, grid_size=5, use_activation=True)
+    x = torch.randn(batch_size, 2)
+    y = network(x)
+
+    assert y.shape == (batch_size, 1), f"Expected shape {(batch_size, 1)}, got {y.shape}"
+    print("✓ Network forward pass test passed")
+
+
+def test_kan_network_gradient():
+    """Test that gradients flow through entire KANNetwork."""
+    batch_size = 4
+    layer_sizes = [2, 3, 1]
+
+    network = KANNetwork(layer_sizes, grid_size=5)
+    x = torch.randn(batch_size, 2, requires_grad=True)
+    y = network(x)
+
+    loss = y.sum()
+    loss.backward()
+
+    assert x.grad is not None, "Gradient not computed for input"
+    for i, layer in enumerate(network.layers):
+        assert layer.control_points.grad is not None, f"Gradient not computed for layer {i}"
+    print("✓ Network gradient test passed")
+
+
+def test_kan_network_learn():
+    """Test that KANNetwork can learn a nonlinear function."""
+    torch.manual_seed(42)
+
+    # Create a 2-layer network
+    network = KANNetwork(layer_sizes=[1, 8, 1], grid_size=10, use_activation=True)
+    optimizer = optim.Adam(network.parameters(), lr=0.01)
+
+    # Generate training data: y = x^2
+    x_train = torch.linspace(-1, 1, 100).unsqueeze(1)
+    y_train = x_train ** 2
+
+    # Train
+    for epoch in range(200):
+        optimizer.zero_grad()
+        y_pred = network(x_train)
+        loss = nn.MSELoss()(y_pred, y_train)
+        loss.backward()
+        optimizer.step()
+
+    with torch.no_grad():
+        y_pred = network(x_train)
+        mse = nn.MSELoss()(y_pred, y_train).item()
+
+    print(f"  MSE after training: {mse:.6f}")
+    assert mse < 0.2, f"MSE too high: {mse}. Network failed to learn x^2."
+    print("✓ Network learning test passed")
+
+
+def test_kan_grid_refinement():
+    """Test grid refinement functionality."""
+    torch.manual_seed(42)
+
+    # Create network with small grid
+    network = KANNetwork(layer_sizes=[1, 4, 1], grid_size=5, use_activation=False)
+
+    x = torch.randn(10, 1)
+    with torch.no_grad():
+        y_before = network(x).clone()
+
+    # Get initial grid info
+    info_before = network.get_grid_info()
+    assert info_before['grid_size'] == 5
+
+    # Refine grid on layer 0
+    network.refine_grid(layer_idx=0, new_grid_size=10)
+
+    info_after = network.get_grid_info()
+    assert info_after['grid_size'] == 10
+
+    # Forward pass should still work
+    with torch.no_grad():
+        y_after = network(x)
+    assert y_after.shape == y_before.shape
+    print("✓ Grid refinement test passed")
+
+
+def test_kan_network_with_activation():
+    """Test KANNetwork with activation functions between layers."""
+    batch_size = 8
+    layer_sizes = [2, 4, 4, 1]
+
+    # Network with activation
+    network_act = KANNetwork(layer_sizes, grid_size=5, use_activation=True)
+    # Network without activation
+    network_no_act = KANNetwork(layer_sizes, grid_size=5, use_activation=False)
+
+    x = torch.randn(batch_size, 2)
+    y_act = network_act(x)
+    y_no_act = network_no_act(x)
+
+    assert y_act.shape == (batch_size, 1)
+    assert y_no_act.shape == (batch_size, 1)
+    print("✓ Network with/without activation test passed")
+
+
 if __name__ == "__main__":
     print("Running KAN layer tests...\n")
     test_kan_forward()
@@ -134,4 +242,12 @@ if __name__ == "__main__":
     test_kan_learn_identity()
     test_kan_learn_nonlinear()
     test_kan_multi_feature()
+
+    print("\nRunning KAN network tests...\n")
+    test_kan_network_forward()
+    test_kan_network_gradient()
+    test_kan_network_learn()
+    test_kan_grid_refinement()
+    test_kan_network_with_activation()
+
     print("\n✓ All tests passed!")
