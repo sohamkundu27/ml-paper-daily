@@ -4,6 +4,7 @@ import torch.optim as optim
 from kan_layer import KANLayer
 from kan_network import KANNetwork
 from kan_classifier import KANClassifier, create_toy_classification_data, train_classifier, evaluate_classifier
+from demo_and_sparsify import create_regression_data, train_regressor, evaluate_regressor, compute_edge_importance, prune_edges
 
 
 def test_kan_forward():
@@ -394,6 +395,138 @@ def test_kan_classifier_circles():
     print("✓ Classifier circles test passed")
 
 
+def test_regression_data_creation():
+    """Test regression data creation for different problem types."""
+    for problem_type in ['polynomial', 'sine', 'mixed']:
+        X, y = create_regression_data(
+            num_samples=100,
+            seed=42,
+            problem_type=problem_type
+        )
+
+        assert X.shape == (100, 1), f"Expected X shape (100, 1), got {X.shape}"
+        assert y.shape == (100, 1), f"Expected y shape (100, 1), got {y.shape}"
+
+    print("✓ Regression data creation test passed")
+
+
+def test_kan_regression_training():
+    """Test that KAN network can train on a simple regression task."""
+    torch.manual_seed(42)
+
+    # Create toy regression data
+    X_train, y_train = create_regression_data(
+        num_samples=150,
+        seed=42,
+        problem_type='polynomial'
+    )
+    X_test, y_test = create_regression_data(
+        num_samples=50,
+        seed=43,
+        problem_type='polynomial'
+    )
+
+    # Create network
+    network = KANNetwork(
+        layer_sizes=[1, 12, 6, 1],
+        grid_size=6,
+        use_activation=True
+    )
+
+    # Train
+    losses = train_regressor(
+        network,
+        X_train, y_train,
+        num_epochs=100,
+        lr=0.05,
+        batch_size=32,
+        verbose=False
+    )
+
+    # Check loss decreased
+    initial_loss = losses[0]
+    final_loss = losses[-1]
+    assert final_loss < initial_loss, f"Loss did not decrease: {initial_loss} -> {final_loss}"
+
+    # Check regression MSE
+    mse, rmse = evaluate_regressor(network, X_test, y_test)
+    print(f"  Test MSE: {mse:.6f}, RMSE: {rmse:.6f}")
+    assert mse < 5.0, f"MSE too high: {mse}"
+
+    print("✓ Regression training test passed")
+
+
+def test_edge_importance():
+    """Test edge importance computation."""
+    network = KANNetwork(
+        layer_sizes=[2, 4, 2],
+        grid_size=5,
+        use_activation=False
+    )
+
+    # Compute importance
+    importance_list = compute_edge_importance(network)
+
+    # Check structure
+    assert len(importance_list) > 0, "No edges computed"
+    assert all('layer' in item and 'importance' in item for item in importance_list), \
+        "Missing required keys in importance dict"
+
+    # Total edges should be 2*4 + 4*2 = 16
+    assert len(importance_list) == 16, f"Expected 16 edges, got {len(importance_list)}"
+
+    # Importances should all be positive
+    importances = [item['importance'] for item in importance_list]
+    assert all(imp >= 0 for imp in importances), "Negative importances found"
+
+    print("✓ Edge importance test passed")
+
+
+def test_edge_pruning():
+    """Test edge pruning functionality."""
+    torch.manual_seed(42)
+
+    network = KANNetwork(
+        layer_sizes=[1, 8, 1],
+        grid_size=5,
+        use_activation=True
+    )
+
+    # Create dummy data and do minimal training
+    X_train, y_train = create_regression_data(50, 42, 'polynomial')
+    train_regressor(network, X_train, y_train, num_epochs=30, lr=0.05, batch_size=16, verbose=False)
+
+    # Get initial control point norms
+    initial_norms = []
+    for layer in network.layers:
+        norms = [layer.control_points[o, i].norm().item()
+                 for o in range(layer.out_features)
+                 for i in range(layer.in_features)]
+        initial_norms.extend(norms)
+
+    # Prune edges
+    pruned_count, importance_list = prune_edges(network, threshold=0.30)
+
+    # Check pruning happened
+    assert pruned_count > 0, "No edges were pruned"
+    assert pruned_count <= len(importance_list), "Pruned count exceeds total edges"
+
+    # Get post-pruning norms
+    post_norms = []
+    for layer in network.layers:
+        norms = [layer.control_points[o, i].norm().item()
+                 for o in range(layer.out_features)
+                 for i in range(layer.in_features)]
+        post_norms.extend(norms)
+
+    # Some norms should have gone to zero
+    zeros_after = sum(1 for n in post_norms if abs(n) < 1e-8)
+    assert zeros_after > 0, "No control points were zeroed out"
+
+    print(f"  Pruned {pruned_count} edges, zeroed {zeros_after} control point vectors")
+    print("✓ Edge pruning test passed")
+
+
 if __name__ == "__main__":
     print("Running KAN layer tests...\n")
     test_kan_forward()
@@ -415,5 +548,11 @@ if __name__ == "__main__":
     test_toy_data_creation()
     test_kan_classifier_training()
     test_kan_classifier_circles()
+
+    print("\nRunning KAN regression and sparsification tests...\n")
+    test_regression_data_creation()
+    test_kan_regression_training()
+    test_edge_importance()
+    test_edge_pruning()
 
     print("\n✓ All tests passed!")
