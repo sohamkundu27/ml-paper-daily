@@ -61,3 +61,27 @@ These simplifications allow for a clean, minimal implementation that demonstrate
 - Grid is still uniformly spaced; no non-uniform grid adaptation
 
 The network is now ready for end-to-end training and can solve multi-layer function approximation tasks. Pass 3 will implement a concrete classifier/regressor on toy data.
+
+**Pass 3 - What is implemented:**
+
+- A `KANClassifier` module that wraps KANNetwork for classification tasks
+- Probability estimation via softmax over logits from the KAN network
+- Support for multi-class classification (2+ classes)
+- Synthetic toy dataset generation: three problem types (moons, circles, XOR) for benchmarking
+- Mini-batch training loop with Adam optimizer and cross-entropy loss
+- Proper evaluation metrics (accuracy) on test data
+- Five comprehensive tests: forward pass, prediction methods, data generation, training convergence (moons dataset), and XOR learning
+- Successfully trains on nonlinear classification problems; achieves >60% accuracy on moons and >70% accuracy on XOR
+
+**Pass 3 - What is simplified/stubbed:**
+
+- No learnable class weights or handling of imbalanced datasets
+- No data augmentation or preprocessing beyond mean/std normalization
+- No early stopping, validation set monitoring, or hyperparameter search
+- No visualization of learned decision boundaries
+- Classifier is a straightforward wrapper without additional features like feature importance or confidence calibration
+- Still uses piecewise linear B-splines (same as prior passes)
+- No sparsity-inducing regularization (L1) on the classifiers
+- XOR problem uses larger networks (3 hidden layers) than other datasets due to its inherent nonlinearity
+
+The classifier successfully demonstrates end-to-end learning of KAN on real classification tasks. Pass 4 will provide a final consolidated demo and summary.

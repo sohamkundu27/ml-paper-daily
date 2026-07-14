@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from kan_layer import KANLayer
 from kan_network import KANNetwork
+from kan_classifier import KANClassifier, create_toy_classification_data, train_classifier, evaluate_classifier
 
 
 def test_kan_forward():
@@ -235,6 +236,164 @@ def test_kan_network_with_activation():
     print("✓ Network with/without activation test passed")
 
 
+def test_kan_classifier_forward():
+    """Test KANClassifier forward pass."""
+    batch_size = 8
+    input_dim = 2
+    num_classes = 2
+
+    classifier = KANClassifier(
+        input_dim=input_dim,
+        hidden_dims=[8, 4],
+        num_classes=num_classes,
+        grid_size=5,
+        use_activation=True
+    )
+
+    x = torch.randn(batch_size, input_dim)
+    logits = classifier(x)
+
+    assert logits.shape == (batch_size, num_classes), \
+        f"Expected shape {(batch_size, num_classes)}, got {logits.shape}"
+    print("✓ Classifier forward pass test passed")
+
+
+def test_kan_classifier_predict():
+    """Test KANClassifier predict and predict_proba methods."""
+    batch_size = 8
+    input_dim = 2
+    num_classes = 3
+
+    classifier = KANClassifier(
+        input_dim=input_dim,
+        hidden_dims=[6],
+        num_classes=num_classes,
+        grid_size=5
+    )
+
+    x = torch.randn(batch_size, input_dim)
+
+    # Test predict_proba
+    probs = classifier.predict_proba(x)
+    assert probs.shape == (batch_size, num_classes)
+    assert torch.all(probs >= 0) and torch.all(probs <= 1), "Probabilities out of [0, 1] range"
+    assert torch.allclose(probs.sum(dim=1), torch.ones(batch_size)), "Probabilities don't sum to 1"
+
+    # Test predict
+    predictions = classifier.predict(x)
+    assert predictions.shape == (batch_size,)
+    assert torch.all(predictions >= 0) and torch.all(predictions < num_classes), \
+        "Predictions out of valid class range"
+
+    print("✓ Classifier predict methods test passed")
+
+
+def test_toy_data_creation():
+    """Test toy classification data creation."""
+    for problem_type in ['moons', 'circles', 'xor']:
+        X, y = create_toy_classification_data(
+            num_samples=100,
+            num_classes=2,
+            input_dim=2,
+            seed=42,
+            problem_type=problem_type
+        )
+
+        assert X.shape == (100, 2), f"Expected X shape (100, 2), got {X.shape}"
+        assert y.shape == (100,), f"Expected y shape (100,), got {y.shape}"
+        assert y.min() >= 0 and y.max() < 2, "Class labels out of range"
+
+    print("✓ Toy data creation test passed")
+
+
+def test_kan_classifier_training():
+    """Test that KAN classifier can train on moons dataset."""
+    torch.manual_seed(42)
+
+    # Create toy data
+    X_train, y_train = create_toy_classification_data(
+        num_samples=200,
+        num_classes=2,
+        input_dim=2,
+        seed=42,
+        problem_type='moons'
+    )
+
+    # Create classifier
+    classifier = KANClassifier(
+        input_dim=2,
+        hidden_dims=[16, 8],
+        num_classes=2,
+        grid_size=8,
+        use_activation=True
+    )
+
+    # Train
+    losses = train_classifier(
+        classifier,
+        X_train, y_train,
+        num_epochs=150,
+        lr=0.05,
+        batch_size=32,
+        verbose=False
+    )
+
+    # Check that loss decreased
+    initial_loss = losses[0]
+    final_loss = losses[-1]
+    print(f"  Initial loss: {initial_loss:.6f}, Final loss: {final_loss:.6f}")
+    assert final_loss < initial_loss, f"Loss did not decrease: {initial_loss} -> {final_loss}"
+
+    # Check training accuracy
+    with torch.no_grad():
+        train_acc = evaluate_classifier(classifier, X_train, y_train)
+    print(f"  Training accuracy: {train_acc:.4f}")
+    assert train_acc > 0.6, f"Training accuracy too low: {train_acc}"
+
+    print("✓ Classifier training test passed")
+
+
+def test_kan_classifier_circles():
+    """Test KAN classifier on circles problem (nonlinear separability)."""
+    torch.manual_seed(42)
+
+    # Create circles data (concentric circles - harder than moons)
+    X_train, y_train = create_toy_classification_data(
+        num_samples=200,
+        num_classes=2,
+        input_dim=2,
+        seed=42,
+        problem_type='circles'
+    )
+
+    # Create classifier
+    classifier = KANClassifier(
+        input_dim=2,
+        hidden_dims=[16, 8],
+        num_classes=2,
+        grid_size=8,
+        use_activation=True
+    )
+
+    # Train
+    losses = train_classifier(
+        classifier,
+        X_train, y_train,
+        num_epochs=200,
+        lr=0.05,
+        batch_size=32,
+        verbose=False
+    )
+
+    # Evaluate
+    with torch.no_grad():
+        train_acc = evaluate_classifier(classifier, X_train, y_train)
+    print(f"  Circles training accuracy: {train_acc:.4f}")
+    assert train_acc > 0.6, f"Circles accuracy too low: {train_acc}"
+
+    print("✓ Classifier circles test passed")
+
+
 if __name__ == "__main__":
     print("Running KAN layer tests...\n")
     test_kan_forward()
@@ -249,5 +408,12 @@ if __name__ == "__main__":
     test_kan_network_learn()
     test_kan_grid_refinement()
     test_kan_network_with_activation()
+
+    print("\nRunning KAN classifier tests...\n")
+    test_kan_classifier_forward()
+    test_kan_classifier_predict()
+    test_toy_data_creation()
+    test_kan_classifier_training()
+    test_kan_classifier_circles()
 
     print("\n✓ All tests passed!")
