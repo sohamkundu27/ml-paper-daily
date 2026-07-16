@@ -170,3 +170,75 @@ class AsyncPatchDiffusion:
                 variance[b, p] = alpha_t**2 + sigma_t**2
 
         return variance
+
+    def get_patch_snr(self, timesteps: np.ndarray) -> np.ndarray:
+        """
+        Compute signal-to-noise ratio (SNR) at each patch.
+        SNR(t) = log(α̅_t / (1 - α̅_t))
+
+        Returns:
+            Array of shape (batch_size, num_patches) with SNR values in dB
+        """
+        batch_size, num_patches = timesteps.shape
+        snr = np.zeros((batch_size, num_patches))
+
+        for b in range(batch_size):
+            for p in range(num_patches):
+                t = timesteps[b, p]
+                alpha_t = self.scheduler.get_alpha_t(t)
+                sigma_t = self.scheduler.get_sigma_t(t)
+                # SNR = (signal_power) / (noise_power) = α̅_t / (1 - α̅_t)
+                # In dB: 10 * log10(SNR)
+                alpha_cumprod = self.scheduler.alpha_cumsum[min(t, self.scheduler.T - 1)]
+                snr_val = alpha_cumprod / (1.0 - alpha_cumprod + 1e-10)
+                snr[b, p] = 10.0 * np.log10(snr_val + 1e-10)
+
+        return snr
+
+    def compute_joint_diffusion_properties(
+        self,
+        timesteps: np.ndarray
+    ) -> dict:
+        """
+        Compute comprehensive theoretical properties of the joint diffusion process.
+
+        Returns:
+            Dictionary with:
+              - mean_snr: average SNR across all patches
+              - min_snr, max_snr: range of SNR values
+              - variance_preservation: boolean indicating if all variances ≈ 1
+              - patch_statistics: per-patch alpha, sigma, SNR values
+        """
+        batch_size, num_patches = timesteps.shape
+        variances = self.get_patch_variance(timesteps)
+        snr_values = self.get_patch_snr(timesteps)
+
+        alpha_vals = np.zeros((batch_size, num_patches))
+        sigma_vals = np.zeros((batch_size, num_patches))
+
+        for b in range(batch_size):
+            for p in range(num_patches):
+                t = timesteps[b, p]
+                alpha_vals[b, p] = self.scheduler.get_alpha_t(t)
+                sigma_vals[b, p] = self.scheduler.get_sigma_t(t)
+
+        # Check that each patch's alpha^2 + sigma^2 ≈ 1 (variance preservation)
+        patch_variances = alpha_vals**2 + sigma_vals**2
+
+        return {
+            "mean_snr": snr_values.mean(),
+            "min_snr": snr_values.min(),
+            "max_snr": snr_values.max(),
+            "mean_alpha": alpha_vals.mean(),
+            "mean_sigma": sigma_vals.mean(),
+            "variance_preservation": np.allclose(variances, 1.0, atol=0.01),
+            "patch_variances_preserved": np.allclose(patch_variances, 1.0, atol=0.01),
+            "max_variance_error": np.abs(variances - 1.0).max(),
+            "timestep_range": (timesteps.min(), timesteps.max()),
+            "patch_statistics": {
+                "alpha": alpha_vals,
+                "sigma": sigma_vals,
+                "snr": snr_values,
+                "variance": variances
+            }
+        }

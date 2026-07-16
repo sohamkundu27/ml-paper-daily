@@ -22,7 +22,7 @@ AsyncPatch Diffusion introduces a joint-diffusion framework that decouples the n
 
 ## Implemented vs. simplified
 
-### Pass 1 (this session)
+### Pass 1
 
 **Implemented:**
 - Noise-level assignment scheduler for spatially heterogeneous diffusion
@@ -34,4 +34,26 @@ AsyncPatch Diffusion introduces a joint-diffusion framework that decouples the n
 - No neural network, no sampling or reverse process yet
 - Toy data only (synthetic grid patterns)
 - No inpainting logic
-- Theoretical guarantees left to pass 2
+
+### Pass 2 (this session)
+
+**Implemented:**
+- Full joint-diffusion forward process with realistic image sizes (32×32, 64×64)
+- Signal-to-noise ratio (SNR) computation for each patch: SNR(t) = log(α̅_t / (1 - α̅_t))
+- Comprehensive theoretical property verification:
+  - Variance preservation across all patches (α_t^2 + σ_t^2 = 1)
+  - SNR monotonicity (SNR decreases as t increases)
+  - Patch statistics collection (alpha, sigma, SNR, variance per patch)
+- Large-scale batch testing with heterogeneous timestep assignments
+- Joint diffusion properties analysis showing valid signal/noise ratio ranges
+- Extended test suite:
+  - Realistic image size tests (32×32 RGB, 64×64 RGB)
+  - SNR monotonicity verification
+  - Large batch heterogeneous processing (8 images × 64×64)
+  - Forward process structural validation
+
+**Simplified/stubbed:**
+- No reverse process (denoising) yet; this is pass 3
+- No training or sampling from the model yet
+- Inpainting demonstration deferred to pass 4
+- No visualization of corruption levels (analysis only)

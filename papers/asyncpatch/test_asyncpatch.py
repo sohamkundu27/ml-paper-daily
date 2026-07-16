@@ -131,6 +131,153 @@ def test_mixed_corruption_levels():
     print("✓ Mixed corruption levels test passed")
 
 
+def test_realistic_image_sizes():
+    """Pass 2: Test forward diffusion on realistic image sizes (32x32, 64x64)."""
+    scheduler = HeterogeneousNoiseScheduler(T=1000)
+    diffusion = AsyncPatchDiffusion(scheduler)
+
+    # 32x32 RGB images with batch size 4
+    x0_32 = torch.randn(4, 3, 32, 32)
+    timesteps_32 = scheduler.sample_heterogeneous_timesteps(batch_size=4, num_patches=64, strategy="uniform")
+    xt_32, noise_32 = diffusion.forward(x0_32, timesteps_32, patch_size=4)
+
+    assert xt_32.shape == x0_32.shape
+    assert noise_32.shape == x0_32.shape
+    assert not torch.isnan(xt_32).any() and not torch.isinf(xt_32).any()
+
+    # 64x64 RGB images with batch size 2
+    x0_64 = torch.randn(2, 3, 64, 64)
+    timesteps_64 = scheduler.sample_heterogeneous_timesteps(batch_size=2, num_patches=256, strategy="uniform")
+    xt_64, noise_64 = diffusion.forward(x0_64, timesteps_64, patch_size=4)
+
+    assert xt_64.shape == x0_64.shape
+    assert noise_64.shape == x0_64.shape
+
+    print("✓ Realistic image sizes test passed")
+
+
+def test_snr_computation():
+    """Pass 2: Verify SNR computation at different timesteps."""
+    scheduler = HeterogeneousNoiseScheduler(T=1000)
+    diffusion = AsyncPatchDiffusion(scheduler)
+
+    timesteps = np.array([[0, 250, 500, 750, 999]])  # Various noise levels
+
+    snr = diffusion.get_patch_snr(timesteps)
+
+    # SNR should decrease monotonically as t increases
+    assert snr[0, 0] > snr[0, 1] > snr[0, 2] > snr[0, 3] > snr[0, 4], \
+        f"SNR not monotonically decreasing: {snr[0]}"
+
+    # At t=0, SNR should be very high (clean)
+    assert snr[0, 0] > 10, f"Expected high SNR at t=0, got {snr[0, 0]}"
+
+    # At t=999, SNR should be very low (mostly noise)
+    assert snr[0, 4] < -10, f"Expected low SNR at t=999, got {snr[0, 4]}"
+
+    print("✓ SNR computation test passed")
+
+
+def test_joint_diffusion_properties():
+    """Pass 2: Verify comprehensive joint diffusion theoretical properties."""
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    scheduler = HeterogeneousNoiseScheduler(T=1000)
+    diffusion = AsyncPatchDiffusion(scheduler)
+
+    # Create a realistic scenario: batched 32x32 images with heterogeneous timesteps
+    x0 = torch.randn(3, 3, 32, 32)
+    timesteps = scheduler.sample_heterogeneous_timesteps(batch_size=3, num_patches=64, strategy="mixed")
+
+    # Compute joint diffusion properties
+    props = diffusion.compute_joint_diffusion_properties(timesteps)
+
+    # Check variance preservation at each patch (critical property)
+    assert props["variance_preservation"], \
+        f"Variance not preserved. Max error: {props['max_variance_error']}"
+    assert props["patch_variances_preserved"], \
+        "Per-patch variance preservation failed"
+
+    # Check SNR properties
+    assert props["mean_snr"] >= -50, "Mean SNR unexpectedly low"
+    assert props["min_snr"] < props["mean_snr"] < props["max_snr"], \
+        "SNR statistics inconsistent"
+
+    # Check alpha and sigma properties
+    assert 0 < props["mean_alpha"] < 1, "Mean alpha out of valid range"
+    assert 0 < props["mean_sigma"] < 1, "Mean sigma out of valid range"
+
+    # With heterogeneous timesteps, should have non-trivial range
+    t_min, t_max = props["timestep_range"]
+    assert t_max > t_min, "Timestep range should be non-trivial"
+
+    print("✓ Joint diffusion properties test passed")
+
+
+def test_large_batch_heterogeneous():
+    """Pass 2: Test large batch with highly heterogeneous timestep assignments."""
+    scheduler = HeterogeneousNoiseScheduler(T=1000)
+    diffusion = AsyncPatchDiffusion(scheduler)
+
+    # Batch of 8 images, 64x64 each
+    batch_size, channels, height, width = 8, 3, 64, 64
+    x0 = torch.randn(batch_size, channels, height, width)
+
+    # Create deliberately heterogeneous timesteps: some images clean, some noisy
+    timesteps = np.zeros((batch_size, 256), dtype=int)
+    for b in range(batch_size):
+        if b < 3:
+            timesteps[b] = 0  # First 3 images: mostly clean
+        elif b < 6:
+            timesteps[b] = np.random.randint(200, 400, size=256)  # Mid: moderate noise
+        else:
+            timesteps[b] = np.random.randint(700, 999, size=256)  # Last 2: heavy noise
+
+    xt, noise = diffusion.forward(x0, timesteps, patch_size=4)
+
+    # Verify output integrity
+    assert xt.shape == x0.shape
+    assert not torch.isnan(xt).any() and not torch.isinf(xt).any()
+
+    # Verify that high-timestep patches are more corrupted
+    props = diffusion.compute_joint_diffusion_properties(timesteps)
+    assert props["min_snr"] < props["max_snr"], "SNR range should be non-trivial"
+
+    print("✓ Large batch heterogeneous test passed")
+
+
+def test_forward_process_reversibility():
+    """Pass 2: Verify that we can compute mean of xt conditioned on noise level."""
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    scheduler = HeterogeneousNoiseScheduler(T=1000)
+    diffusion = AsyncPatchDiffusion(scheduler)
+
+    # 16x16 image with 4x4 patch size = 16 patches
+    x0 = torch.ones(1, 1, 16, 16)
+    timesteps = np.array([[0, 500, 999, 100, 50, 200, 750, 300,
+                           0, 500, 999, 100, 50, 200, 750, 300]])  # 16 patches
+
+    xt, noise = diffusion.forward(x0, timesteps, patch_size=4)
+
+    # Verify output shape and integrity
+    assert xt.shape == x0.shape
+    assert noise.shape == x0.shape
+    assert not torch.isnan(xt).any() and not torch.isinf(xt).any()
+
+    # For t=0 patches, corruption should be minimal
+    alpha_0 = scheduler.get_alpha_t(0)
+    assert alpha_0 > 0.9, f"Expected high alpha at t=0, got {alpha_0}"
+
+    # For t=999 patches, should be heavily corrupted
+    alpha_999 = scheduler.get_alpha_t(999)
+    assert alpha_999 < 0.2, f"Expected low alpha at t=999, got {alpha_999}"
+
+    print("✓ Forward process reversibility test passed")
+
+
 if __name__ == "__main__":
     test_noise_scheduler()
     test_heterogeneous_timesteps()
@@ -138,4 +285,10 @@ if __name__ == "__main__":
     test_variance_preservation()
     test_forward_with_fixed_timesteps()
     test_mixed_corruption_levels()
-    print("\n✅ All tests passed!")
+    # Pass 2 tests
+    test_realistic_image_sizes()
+    test_snr_computation()
+    test_joint_diffusion_properties()
+    test_large_batch_heterogeneous()
+    test_forward_process_reversibility()
+    print("\n✅ All tests passed! (Pass 1 + Pass 2)")
