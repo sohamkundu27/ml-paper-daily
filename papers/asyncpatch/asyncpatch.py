@@ -1,7 +1,8 @@
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, List
 
 
 class HeterogeneousNoiseScheduler:
@@ -242,3 +243,218 @@ class AsyncPatchDiffusion:
                 "variance": variances
             }
         }
+
+
+class SimpleDenoiser(nn.Module):
+    """
+    Simple ConvNet denoiser for heterogeneous diffusion.
+
+    Conditions on per-patch timesteps by concatenating a timestep map
+    to the input. Outputs predicted noise for the corrupted image.
+    """
+
+    def __init__(self, in_channels: int = 3, hidden_channels: int = 16):
+        super().__init__()
+        # in_channels + 1: original channels + timestep map
+        self.conv1 = nn.Conv2d(in_channels + 1, hidden_channels, 3, padding=1)
+        self.conv2 = nn.Conv2d(hidden_channels, hidden_channels, 3, padding=1)
+        self.conv3 = nn.Conv2d(hidden_channels, in_channels, 3, padding=1)
+
+    def forward(
+        self,
+        xt: torch.Tensor,
+        timesteps: torch.Tensor,
+        scheduler: 'HeterogeneousNoiseScheduler',
+        patch_size: int = 1
+    ) -> torch.Tensor:
+        """
+        Denoise by predicting noise.
+
+        Args:
+            xt: Corrupted image, shape (batch, channels, height, width)
+            timesteps: Timestep per patch, shape (batch, num_patches)
+            scheduler: HeterogeneousNoiseScheduler instance
+            patch_size: Size of each patch
+
+        Returns:
+            Predicted noise, shape (batch, channels, height, width)
+        """
+        batch_size, channels, height, width = xt.shape
+
+        # Create timestep map: normalize timesteps to [0, 1] and expand to spatial dims
+        num_patches_h = height // patch_size
+        num_patches_w = width // patch_size
+
+        # Expand per-patch timesteps to full spatial resolution
+        timestep_map = torch.zeros(batch_size, 1, height, width, device=xt.device)
+        for b in range(batch_size):
+            idx = 0
+            for i in range(num_patches_h):
+                for j in range(num_patches_w):
+                    t_val = timesteps[b, idx].item() if isinstance(timesteps[b, idx], torch.Tensor) else timesteps[b, idx]
+                    normalized_t = t_val / scheduler.T
+                    timestep_map[b, 0,
+                                 i * patch_size:(i + 1) * patch_size,
+                                 j * patch_size:(j + 1) * patch_size] = normalized_t
+                    idx += 1
+
+        # Concatenate timestep map to input
+        x = torch.cat([xt, timestep_map], dim=1)
+
+        # Simple ConvNet forward pass
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = self.conv3(x)
+
+        return x
+
+
+class DenoisingTrainer:
+    """
+    Trainer for the heterogeneous denoiser.
+
+    Handles forward pass corruption, denoising predictions, and loss computation.
+    """
+
+    def __init__(
+        self,
+        scheduler: HeterogeneousNoiseScheduler,
+        denoiser: SimpleDenoiser,
+        device: str = "cpu"
+    ):
+        self.scheduler = scheduler
+        self.denoiser = denoiser.to(device)
+        self.device = device
+        self.diffusion = AsyncPatchDiffusion(scheduler)
+
+    def compute_loss(
+        self,
+        x0: torch.Tensor,
+        timesteps: np.ndarray,
+        patch_size: int = 1
+    ) -> torch.Tensor:
+        """
+        Compute denoising loss (MSE between predicted and true noise).
+
+        Args:
+            x0: Clean image, shape (batch, channels, height, width)
+            timesteps: Per-patch timesteps, shape (batch, num_patches)
+            patch_size: Size of each patch
+
+        Returns:
+            Scalar loss
+        """
+        x0 = x0.to(self.device)
+
+        # Forward diffusion: corrupt x0
+        xt, noise_true = self.diffusion.forward(x0, timesteps, patch_size=patch_size)
+        xt = xt.to(self.device)
+        noise_true = noise_true.to(self.device)
+
+        # Convert timesteps to tensor
+        timesteps_tensor = torch.from_numpy(timesteps).long().to(self.device)
+
+        # Denoiser predicts noise
+        noise_pred = self.denoiser(xt, timesteps_tensor, self.scheduler, patch_size=patch_size)
+
+        # MSE loss
+        loss = F.mse_loss(noise_pred, noise_true)
+        return loss
+
+    def train_step(
+        self,
+        x0: torch.Tensor,
+        timesteps: np.ndarray,
+        optimizer: torch.optim.Optimizer,
+        patch_size: int = 1
+    ) -> float:
+        """
+        Single training step.
+
+        Args:
+            x0: Clean image batch
+            timesteps: Per-patch timesteps
+            optimizer: PyTorch optimizer
+            patch_size: Size of each patch
+
+        Returns:
+            Loss value (scalar, detached)
+        """
+        self.denoiser.train()
+        optimizer.zero_grad()
+
+        loss = self.compute_loss(x0, timesteps, patch_size=patch_size)
+        loss.backward()
+        optimizer.step()
+
+        return loss.item()
+
+    def eval_loss(
+        self,
+        x0: torch.Tensor,
+        timesteps: np.ndarray,
+        patch_size: int = 1
+    ) -> float:
+        """
+        Evaluate loss without training.
+
+        Args:
+            x0: Clean image batch
+            timesteps: Per-patch timesteps
+            patch_size: Size of each patch
+
+        Returns:
+            Loss value (scalar, detached)
+        """
+        self.denoiser.eval()
+        with torch.no_grad():
+            loss = self.compute_loss(x0, timesteps, patch_size=patch_size)
+        return loss.item()
+
+    def sample(
+        self,
+        xt: torch.Tensor,
+        timesteps: np.ndarray,
+        num_steps: int = 5,
+        patch_size: int = 1
+    ) -> torch.Tensor:
+        """
+        Simple iterative denoising (reverse diffusion).
+
+        Starts from corrupted image xt and iteratively denoises by predicting
+        noise and reducing timesteps. This is a simplified reverse process.
+
+        Args:
+            xt: Corrupted image, shape (batch, channels, height, width)
+            timesteps: Per-patch timesteps, shape (batch, num_patches)
+            num_steps: Number of denoising iterations
+            patch_size: Size of each patch
+
+        Returns:
+            Denoised image, shape (batch, channels, height, width)
+        """
+        self.denoiser.eval()
+        xt = xt.to(self.device)
+
+        current_timesteps = timesteps.copy()
+        current_x = xt.clone()
+
+        with torch.no_grad():
+            for step in range(num_steps):
+                # Predict noise
+                timesteps_tensor = torch.from_numpy(current_timesteps).long().to(self.device)
+                noise_pred = self.denoiser(
+                    current_x,
+                    timesteps_tensor,
+                    self.scheduler,
+                    patch_size=patch_size
+                )
+
+                # Reduce timestep (simple linear schedule)
+                step_size = int(self.scheduler.T / (num_steps + 1))
+                current_timesteps = np.maximum(current_timesteps - step_size, 0)
+
+                # Update x: subtract noise scaled by step size
+                current_x = current_x - 0.1 * noise_pred
+
+        return current_x

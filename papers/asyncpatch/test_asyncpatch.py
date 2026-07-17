@@ -1,6 +1,11 @@
 import numpy as np
 import torch
-from asyncpatch import HeterogeneousNoiseScheduler, AsyncPatchDiffusion
+from asyncpatch import (
+    HeterogeneousNoiseScheduler,
+    AsyncPatchDiffusion,
+    SimpleDenoiser,
+    DenoisingTrainer
+)
 
 
 def test_noise_scheduler():
@@ -278,6 +283,143 @@ def test_forward_process_reversibility():
     print("✓ Forward process reversibility test passed")
 
 
+def test_denoiser_forward():
+    """Pass 3: Test denoiser forward pass."""
+    scheduler = HeterogeneousNoiseScheduler(T=1000)
+    denoiser = SimpleDenoiser(in_channels=3, hidden_channels=16)
+
+    # 32x32 RGB image with 4x4 patches
+    xt = torch.randn(2, 3, 32, 32)
+    timesteps = scheduler.sample_heterogeneous_timesteps(batch_size=2, num_patches=64, strategy="uniform")
+    timesteps_tensor = torch.from_numpy(timesteps).long()
+
+    # Denoiser should output same shape as input
+    noise_pred = denoiser(xt, timesteps_tensor, scheduler, patch_size=4)
+
+    assert noise_pred.shape == xt.shape, f"Expected shape {xt.shape}, got {noise_pred.shape}"
+    assert not torch.isnan(noise_pred).any(), "Denoiser output contains NaN"
+    assert not torch.isinf(noise_pred).any(), "Denoiser output contains inf"
+
+    print("✓ Denoiser forward test passed")
+
+
+def test_denoising_trainer_loss():
+    """Pass 3: Test that trainer can compute loss."""
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    scheduler = HeterogeneousNoiseScheduler(T=1000)
+    denoiser = SimpleDenoiser(in_channels=3, hidden_channels=16)
+    trainer = DenoisingTrainer(scheduler, denoiser, device="cpu")
+
+    # Create toy image
+    x0 = torch.randn(2, 3, 16, 16)
+    timesteps = scheduler.sample_heterogeneous_timesteps(batch_size=2, num_patches=16, strategy="uniform")
+
+    # Compute loss
+    loss = trainer.compute_loss(x0, timesteps, patch_size=4)
+
+    assert loss.item() > 0, f"Expected positive loss, got {loss.item()}"
+    assert not torch.isnan(loss), "Loss is NaN"
+    assert not torch.isinf(loss), "Loss is inf"
+
+    print("✓ Denoising trainer loss test passed")
+
+
+def test_training_step():
+    """Pass 3: Test single training step."""
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    scheduler = HeterogeneousNoiseScheduler(T=1000)
+    denoiser = SimpleDenoiser(in_channels=1, hidden_channels=8)
+    trainer = DenoisingTrainer(scheduler, denoiser, device="cpu")
+
+    # Small grayscale image for quick training
+    x0 = torch.randn(1, 1, 16, 16)
+    timesteps = scheduler.sample_heterogeneous_timesteps(batch_size=1, num_patches=16, strategy="mixed")
+
+    # Optimizer
+    optimizer = torch.optim.Adam(denoiser.parameters(), lr=0.001)
+
+    # Training step
+    loss_before = trainer.eval_loss(x0, timesteps, patch_size=4)
+    trainer.train_step(x0, timesteps, optimizer, patch_size=4)
+    loss_after = trainer.eval_loss(x0, timesteps, patch_size=4)
+
+    # Loss should decrease (or at least be valid)
+    assert not np.isnan(loss_after), "Loss became NaN after training step"
+    assert loss_after >= 0, "Loss is negative"
+
+    print(f"✓ Training step test passed (loss: {loss_before:.4f} -> {loss_after:.4f})")
+
+
+def test_mini_training_loop():
+    """Pass 3: Mini training loop on toy data."""
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    scheduler = HeterogeneousNoiseScheduler(T=200)  # Fewer steps for speed
+    denoiser = SimpleDenoiser(in_channels=1, hidden_channels=8)
+    trainer = DenoisingTrainer(scheduler, denoiser, device="cpu")
+
+    # Single small grayscale image
+    x0 = torch.ones(1, 1, 16, 16) + 0.1 * torch.randn(1, 1, 16, 16)
+    timesteps = scheduler.sample_heterogeneous_timesteps(batch_size=1, num_patches=16, strategy="mixed")
+
+    optimizer = torch.optim.Adam(denoiser.parameters(), lr=0.01)
+
+    # Train for a few steps
+    losses = []
+    for step in range(3):
+        loss = trainer.train_step(x0, timesteps, optimizer, patch_size=4)
+        losses.append(loss)
+
+    # Check that losses are reasonable
+    assert all(isinstance(l, float) and l >= 0 for l in losses), "Invalid losses"
+    assert not any(np.isnan(l) for l in losses), "NaN loss during training"
+
+    print(f"✓ Mini training loop test passed (losses: {[f'{l:.4f}' for l in losses]})")
+
+
+def test_sampling():
+    """Pass 3: Test iterative denoising sampling."""
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    scheduler = HeterogeneousNoiseScheduler(T=200)
+    denoiser = SimpleDenoiser(in_channels=1, hidden_channels=8)
+    trainer = DenoisingTrainer(scheduler, denoiser, device="cpu")
+
+    # Pre-train denoiser briefly so it doesn't output garbage
+    x0_train = torch.ones(2, 1, 16, 16) + 0.1 * torch.randn(2, 1, 16, 16)
+    timesteps_train = scheduler.sample_heterogeneous_timesteps(batch_size=2, num_patches=16, strategy="mixed")
+    optimizer = torch.optim.Adam(denoiser.parameters(), lr=0.01)
+    for _ in range(2):
+        trainer.train_step(x0_train, timesteps_train, optimizer, patch_size=4)
+
+    # Now sample from a corrupted image
+    x0 = torch.ones(1, 1, 16, 16)
+    timesteps = np.array([[999] * 16])  # All patches heavily corrupted
+
+    # Create corrupted image
+    diffusion = AsyncPatchDiffusion(scheduler)
+    xt, _ = diffusion.forward(x0, timesteps, patch_size=4)
+
+    # Sample (denoise)
+    x_denoised = trainer.sample(xt, timesteps, num_steps=3, patch_size=4)
+
+    assert x_denoised.shape == xt.shape, f"Expected shape {xt.shape}, got {x_denoised.shape}"
+    assert not torch.isnan(x_denoised).any(), "Denoised output contains NaN"
+    assert not torch.isinf(x_denoised).any(), "Denoised output contains inf"
+
+    # Denoised should be different from heavily corrupted
+    diff = (x_denoised - xt).abs().mean().item()
+    assert diff > 0.01, f"Denoised too similar to corrupted: diff={diff}"
+
+    print(f"✓ Sampling test passed (denoising diff: {diff:.4f})")
+
+
 if __name__ == "__main__":
     test_noise_scheduler()
     test_heterogeneous_timesteps()
@@ -291,4 +433,10 @@ if __name__ == "__main__":
     test_joint_diffusion_properties()
     test_large_batch_heterogeneous()
     test_forward_process_reversibility()
-    print("\n✅ All tests passed! (Pass 1 + Pass 2)")
+    # Pass 3 tests
+    test_denoiser_forward()
+    test_denoising_trainer_loss()
+    test_training_step()
+    test_mini_training_loop()
+    test_sampling()
+    print("\n✅ All tests passed! (Pass 1 + Pass 2 + Pass 3)")

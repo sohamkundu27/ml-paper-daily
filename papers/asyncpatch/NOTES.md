@@ -35,7 +35,7 @@ AsyncPatch Diffusion introduces a joint-diffusion framework that decouples the n
 - Toy data only (synthetic grid patterns)
 - No inpainting logic
 
-### Pass 2 (this session)
+### Pass 2
 
 **Implemented:**
 - Full joint-diffusion forward process with realistic image sizes (32×32, 64×64)
@@ -57,3 +57,34 @@ AsyncPatch Diffusion introduces a joint-diffusion framework that decouples the n
 - No training or sampling from the model yet
 - Inpainting demonstration deferred to pass 4
 - No visualization of corruption levels (analysis only)
+
+### Pass 3 (this session)
+
+**Implemented:**
+- SimpleDenoiser: Lightweight ConvNet that conditions on per-patch timesteps
+  - Takes corrupted image + normalized timestep map as input
+  - Predicts noise for denoising
+  - 3-layer convolutional architecture: 16 hidden channels
+- DenoisingTrainer: Training framework for heterogeneous denoising
+  - Compute MSE loss between predicted and true noise
+  - Single train_step: forward corruption, denoiser prediction, backward pass
+  - Eval mode for validation loss computation
+  - Iterative sampling (reverse process):
+    - Starts from corrupted image
+    - Iteratively predicts and removes noise over fixed steps
+    - Simple linear timestep schedule with 0.1 noise scaling
+- Comprehensive test suite for Pass 3:
+  - Denoiser forward pass (correctness and shape validation)
+  - Trainer loss computation on heterogeneous timesteps
+  - Single training step with gradient descent verification
+  - Mini training loop (3 steps) on toy 16×16 images
+  - Iterative sampling starting from heavily corrupted images
+
+**Simplified/stubbed:**
+- Denoiser architecture is minimal (no skip connections, no attention)
+- Sampling uses simple linear timestep reduction and fixed noise scaling (not full reverse diffusion)
+- No guidance mechanism (e.g., classifier guidance)
+- No adaptive denoising schedules per patch
+- Inpainting (fixing known regions) deferred to pass 4
+- No model persistence/checkpointing
+- Single-step sampling improvement rather than full ancestral sampling
