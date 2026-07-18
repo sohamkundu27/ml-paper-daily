@@ -420,6 +420,169 @@ def test_sampling():
     print(f"✓ Sampling test passed (denoising diff: {diff:.4f})")
 
 
+def test_inpaint_basic():
+    """Pass 4: Basic inpainting test."""
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    scheduler = HeterogeneousNoiseScheduler(T=200)
+    denoiser = SimpleDenoiser(in_channels=1, hidden_channels=8)
+    trainer = DenoisingTrainer(scheduler, denoiser, device="cpu")
+
+    # Create a simple checkerboard pattern
+    x0 = torch.zeros(1, 1, 16, 16)
+    x0[0, 0, :8, :8] = 1.0  # Top-left quadrant is white
+
+    # Create inpainting mask: right half is unknown (to be inpainted)
+    inpaint_mask = torch.ones(1, 1, 16, 16)
+    inpaint_mask[0, 0, :, 8:] = 0.0  # Right half unknown
+
+    # Pre-train denoiser
+    timesteps = scheduler.sample_heterogeneous_timesteps(batch_size=1, num_patches=16, strategy="mixed")
+    optimizer = torch.optim.Adam(denoiser.parameters(), lr=0.01)
+    for _ in range(3):
+        trainer.train_step(x0, timesteps, optimizer, patch_size=4)
+
+    # Run inpainting
+    x_inpainted = trainer.inpaint(x0, inpaint_mask, timesteps, num_steps=3, patch_size=4)
+
+    assert x_inpainted.shape == x0.shape, f"Expected shape {x0.shape}, got {x_inpainted.shape}"
+    assert not torch.isnan(x_inpainted).any(), "Inpainted output contains NaN"
+    assert not torch.isinf(x_inpainted).any(), "Inpainted output contains inf"
+
+    # Known regions should remain unchanged (within noise tolerance)
+    known_diff = (x_inpainted[:, :, :, :8] - x0[:, :, :, :8]).abs().mean().item()
+    assert known_diff < 0.5, f"Known regions changed too much: diff={known_diff}"
+
+    print(f"✓ Inpainting basic test passed (known region diff: {known_diff:.4f})")
+
+
+def test_inpaint_center_mask():
+    """Pass 4: Inpainting with center region unknown."""
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    scheduler = HeterogeneousNoiseScheduler(T=200)
+    denoiser = SimpleDenoiser(in_channels=1, hidden_channels=8)
+    trainer = DenoisingTrainer(scheduler, denoiser, device="cpu")
+
+    # Create a simple pattern
+    x0 = torch.ones(1, 1, 16, 16)
+
+    # Create mask: center 8x8 is unknown
+    inpaint_mask = torch.ones(1, 1, 16, 16)
+    inpaint_mask[0, 0, 4:12, 4:12] = 0.0
+
+    # Quick training
+    timesteps = scheduler.sample_heterogeneous_timesteps(batch_size=1, num_patches=16, strategy="mixed")
+    optimizer = torch.optim.Adam(denoiser.parameters(), lr=0.01)
+    for _ in range(2):
+        trainer.train_step(x0, timesteps, optimizer, patch_size=4)
+
+    # Inpaint
+    x_inpainted = trainer.inpaint(x0, inpaint_mask, timesteps, num_steps=3, patch_size=4)
+
+    assert x_inpainted.shape == x0.shape
+    assert not torch.isnan(x_inpainted).any()
+
+    # Edges should be close to original (known)
+    edge_diff = (x_inpainted[0, 0, 0, :] - x0[0, 0, 0, :]).abs().mean().item()
+    center_diff = (x_inpainted[0, 0, 4:12, 4:12] - x0[0, 0, 4:12, 4:12]).abs().mean().item()
+
+    assert edge_diff < center_diff, \
+        f"Expected known edges < unknown center, got {edge_diff} vs {center_diff}"
+
+    print(f"✓ Inpainting center mask test passed (edge diff: {edge_diff:.4f}, center diff: {center_diff:.4f})")
+
+
+def test_end_to_end_demo():
+    """Pass 4: Full end-to-end inpainting demonstration."""
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    print("\n--- Pass 4: End-to-End Inpainting Demo ---")
+
+    # Create scheduler and denoiser
+    scheduler = HeterogeneousNoiseScheduler(T=200)
+    denoiser = SimpleDenoiser(in_channels=1, hidden_channels=8)
+    trainer = DenoisingTrainer(scheduler, denoiser, device="cpu")
+
+    # Create toy dataset: simple 16x16 checkerboard patterns
+    x_train = []
+    for i in range(4):
+        img = torch.zeros(1, 1, 16, 16)
+        # Alternate checkerboard pattern
+        if i % 2 == 0:
+            img[0, 0, :8, :8] = 1.0
+            img[0, 0, 8:, 8:] = 1.0
+        else:
+            img[0, 0, :8, 8:] = 1.0
+            img[0, 0, 8:, :8] = 1.0
+        x_train.append(img)
+    x_train = torch.cat(x_train, dim=0)
+
+    # Train denoiser on toy data
+    print("Training denoiser on toy checkerboard patterns...")
+    timesteps_train = scheduler.sample_heterogeneous_timesteps(
+        batch_size=4, num_patches=16, strategy="mixed"
+    )
+    optimizer = torch.optim.Adam(denoiser.parameters(), lr=0.01)
+
+    train_losses = []
+    for epoch in range(5):
+        loss = trainer.train_step(x_train, timesteps_train, optimizer, patch_size=4)
+        train_losses.append(loss)
+
+    print(f"Training losses: {[f'{l:.4f}' for l in train_losses]}")
+
+    # Test inpainting on new image
+    print("\nTesting inpainting...")
+    x_test = torch.ones(1, 1, 16, 16) * 0.5  # Gray image
+
+    # Create mask: corners are known, center is unknown
+    inpaint_mask = torch.zeros(1, 1, 16, 16)
+    inpaint_mask[0, 0, :4, :] = 1.0  # Top edge
+    inpaint_mask[0, 0, 12:, :] = 1.0  # Bottom edge
+    inpaint_mask[0, 0, :, :4] = 1.0  # Left edge
+    inpaint_mask[0, 0, :, 12:] = 1.0  # Right edge
+
+    # Timesteps: higher for unknown regions, lower for known
+    timesteps_test = np.array([[999 if inpaint_mask[0, 0, i*4, j*4].item() == 0 else 100
+                                for j in range(4)] for i in range(4)]).reshape(1, 16)
+
+    # Run inpainting with heterogeneous noise
+    x_inpainted = trainer.inpaint(
+        x_test, inpaint_mask, timesteps_test, num_steps=5, patch_size=4
+    )
+
+    # Compute statistics
+    known_regions = x_inpainted * inpaint_mask
+    unknown_regions = x_inpainted * (1.0 - inpaint_mask)
+
+    known_mean = known_regions[known_regions != 0].mean().item()
+    unknown_mean = unknown_regions[unknown_regions != 0].mean().item() if unknown_regions.abs().sum() > 0 else 0
+
+    print(f"Original image mean: {x_test.mean().item():.4f}")
+    print(f"Known regions mean: {known_mean:.4f}")
+    print(f"Unknown regions mean: {unknown_mean:.4f}")
+    print(f"Inpainted image mean: {x_inpainted.mean().item():.4f}")
+
+    # Verify output
+    assert x_inpainted.shape == x_test.shape
+    assert not torch.isnan(x_inpainted).any()
+    assert -3.0 < x_inpainted.min().item() < 3.0, "Output out of expected range"
+    assert -3.0 < x_inpainted.max().item() < 3.0, "Output out of expected range"
+
+    print("✓ End-to-end inpainting demo passed!")
+
+    return {
+        "x_test": x_test,
+        "inpaint_mask": inpaint_mask,
+        "x_inpainted": x_inpainted,
+        "train_losses": train_losses
+    }
+
+
 if __name__ == "__main__":
     test_noise_scheduler()
     test_heterogeneous_timesteps()
@@ -439,4 +602,8 @@ if __name__ == "__main__":
     test_training_step()
     test_mini_training_loop()
     test_sampling()
-    print("\n✅ All tests passed! (Pass 1 + Pass 2 + Pass 3)")
+    # Pass 4 tests
+    test_inpaint_basic()
+    test_inpaint_center_mask()
+    test_end_to_end_demo()
+    print("\n✅ All tests passed! (Pass 1 + Pass 2 + Pass 3 + Pass 4)")

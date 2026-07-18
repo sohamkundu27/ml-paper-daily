@@ -458,3 +458,60 @@ class DenoisingTrainer:
                 current_x = current_x - 0.1 * noise_pred
 
         return current_x
+
+    def inpaint(
+        self,
+        x0_masked: torch.Tensor,
+        inpaint_mask: torch.Tensor,
+        timesteps: np.ndarray,
+        num_steps: int = 5,
+        patch_size: int = 1
+    ) -> torch.Tensor:
+        """
+        Inpainting: sample unknown regions while keeping known regions fixed.
+
+        Args:
+            x0_masked: Input image with unknown regions (will be corrupted), shape (B, C, H, W)
+            inpaint_mask: Binary mask where 1 = known (keep fixed), 0 = unknown (inpaint),
+                         shape (B, 1, H, W)
+            timesteps: Per-patch timesteps for corruption, shape (batch, num_patches)
+            num_steps: Number of denoising iterations
+            patch_size: Size of each patch
+
+        Returns:
+            Inpainted image with unknown regions filled in, shape (B, C, H, W)
+        """
+        self.denoiser.eval()
+        x0_masked = x0_masked.to(self.device)
+        inpaint_mask = inpaint_mask.to(self.device)
+
+        # Corrupt the unknown regions by applying forward diffusion
+        xt, _ = self.diffusion.forward(x0_masked, timesteps, patch_size=patch_size)
+        xt = xt.to(self.device)
+
+        # Blend: keep known regions from original, use corrupted for unknown
+        xt = x0_masked * inpaint_mask + xt * (1.0 - inpaint_mask)
+
+        current_timesteps = timesteps.copy()
+        current_x = xt.clone()
+
+        with torch.no_grad():
+            for step in range(num_steps):
+                # Predict noise
+                timesteps_tensor = torch.from_numpy(current_timesteps).long().to(self.device)
+                noise_pred = self.denoiser(
+                    current_x,
+                    timesteps_tensor,
+                    self.scheduler,
+                    patch_size=patch_size
+                )
+
+                # Reduce timestep
+                step_size = int(self.scheduler.T / (num_steps + 1))
+                current_timesteps = np.maximum(current_timesteps - step_size, 0)
+
+                # Update only unknown regions
+                current_x = current_x - 0.1 * noise_pred
+                current_x = x0_masked * inpaint_mask + current_x * (1.0 - inpaint_mask)
+
+        return current_x

@@ -58,7 +58,7 @@ AsyncPatch Diffusion introduces a joint-diffusion framework that decouples the n
 - Inpainting demonstration deferred to pass 4
 - No visualization of corruption levels (analysis only)
 
-### Pass 3 (this session)
+### Pass 3
 
 **Implemented:**
 - SimpleDenoiser: Lightweight ConvNet that conditions on per-patch timesteps
@@ -88,3 +88,41 @@ AsyncPatch Diffusion introduces a joint-diffusion framework that decouples the n
 - Inpainting (fixing known regions) deferred to pass 4
 - No model persistence/checkpointing
 - Single-step sampling improvement rather than full ancestral sampling
+
+### Pass 4 (this session)
+
+**Implemented:**
+- Inpainting method on DenoisingTrainer:
+  - Takes an image, an inpainting mask (1 = known, 0 = unknown), and timesteps
+  - Applies forward diffusion only to unknown regions (high noise levels)
+  - Iteratively denoises while keeping known regions fixed (clamped to original values)
+  - Blends predicted denoising updates with fixed known regions at each step
+- End-to-end inpainting demonstration:
+  - Trains denoiser on toy checkerboard patterns (4 patterns, 16×16, grayscale)
+  - Tests inpainting on a uniform gray image with edge-only mask (corners known, center unknown)
+  - Demonstrates that unknown regions are filled with realistic values while known regions remain unchanged
+  - Shows heterogeneous timestep assignment: high (999) for unknown patches, moderate (100) for known
+- Comprehensive Pass 4 test suite:
+  - Basic inpainting with right-half unknown mask
+  - Center-region inpainting with 8×8 center mask
+  - Full end-to-end demo with 5 training epochs and 5 inpainting steps
+
+**Simplified/stubbed:**
+- Inpainting does not use learned priors specific to the content (random initialization for unknown regions)
+- No content-aware guidance or boundary smoothing
+- Denoiser architecture remains simple (no advanced architectures like UNet with skip connections)
+- No probabilistic sampling from the reverse process (deterministic noise prediction and removal)
+- Timestep assignment for inpainting is manual, not learned
+- No comparison to ground truth or evaluation metrics beyond shape/value checking
+- Limited to small synthetic toy images (16×16)
+
+## Summary
+
+AsyncPatch Diffusion successfully demonstrates spatially-flexible diffusion through heterogeneous per-patch noise schedules. The 4-pass implementation shows:
+
+1. **Pass 1:** Valid heterogeneous noise assignment and forward diffusion
+2. **Pass 2:** Realistic image handling with verified SNR properties
+3. **Pass 3:** Trainable reverse process with iterative sampling
+4. **Pass 4:** Proof-of-concept inpainting where regions with different noise levels are handled independently
+
+The core mechanism is functional: different spatial regions can follow independent denoising trajectories, enabling inpainting by selectively applying high noise to unknown regions and high signal retention to known regions. This decoupling is the key insight that makes AsyncPatch Diffusion distinctive—traditional diffusion requires a global noise schedule, whereas this approach allows per-patch flexibility.
