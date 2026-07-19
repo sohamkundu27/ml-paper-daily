@@ -95,3 +95,96 @@ class CategoricalDiffusion:
                 )
 
         return x_t
+
+    def forward_with_rehash(
+        self,
+        x0: np.ndarray,
+        t: int,
+        num_corrupts: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Sample x_t with rehashing: corrupt only a random subset of positions.
+
+        This implements the key ReDDiT innovation: instead of using a single
+        absorbing state, we use randomized multi-index corruption patterns that
+        create diverse noise paths during training.
+
+        Args:
+            x0: Discrete tokens, shape (batch_size, seq_len)
+            t: Timestep index in [0, num_steps]
+            num_corrupts: Number of positions to randomly corrupt per sample
+
+        Returns:
+            x_t: Noised tokens with some positions corrupted, same shape as x0
+            corruption_mask: Boolean mask indicating which positions were corrupted
+        """
+        assert 0 <= t <= self.num_steps, f"t={t} out of range [0, {self.num_steps}]"
+        assert np.all((x0 >= 0) & (x0 < self.num_classes)), "x0 contains invalid class indices"
+
+        batch_size, seq_len = x0.shape
+        Q_t = self.q_matrix[t]
+
+        x_t = x0.copy().astype(np.int32)
+        corruption_mask = np.zeros((batch_size, seq_len), dtype=bool)
+
+        # Randomly select positions to corrupt for each sample
+        for i in range(batch_size):
+            # Sample random positions to corrupt, ensuring num_corrupts <= seq_len
+            actual_corrupts = min(num_corrupts, seq_len)
+            corrupt_positions = np.random.choice(
+                seq_len,
+                size=actual_corrupts,
+                replace=False
+            )
+
+            for pos in corrupt_positions:
+                cls = x0[i, pos].astype(int)
+                x_t[i, pos] = np.random.choice(
+                    self.num_classes,
+                    p=Q_t[:, cls]
+                )
+                corruption_mask[i, pos] = True
+
+        return x_t, corruption_mask
+
+    def forward_batch_with_rehash(
+        self,
+        x0: np.ndarray,
+        timesteps: np.ndarray,
+        num_corrupts: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Sample x_t with rehashing for multiple timesteps at once.
+
+        Args:
+            x0: Discrete tokens, shape (batch_size, seq_len)
+            timesteps: Array of timestep indices, shape (batch_size,)
+            num_corrupts: Number of positions to randomly corrupt per sample
+
+        Returns:
+            x_t: Noised tokens with randomized corruption, shape (batch_size, seq_len)
+            corruption_masks: Boolean masks for each sample, shape (batch_size, seq_len)
+        """
+        batch_size, seq_len = x0.shape
+        x_t = x0.copy().astype(np.int32)
+        corruption_masks = np.zeros((batch_size, seq_len), dtype=bool)
+
+        for i in range(batch_size):
+            t = timesteps[i]
+            Q_t = self.q_matrix[t]
+
+            # Sample random positions to corrupt
+            actual_corrupts = min(num_corrupts, seq_len)
+            corrupt_positions = np.random.choice(
+                seq_len,
+                size=actual_corrupts,
+                replace=False
+            )
+
+            for pos in corrupt_positions:
+                cls = x0[i, pos].astype(int)
+                x_t[i, pos] = np.random.choice(
+                    self.num_classes,
+                    p=Q_t[:, cls]
+                )
+                corruption_masks[i, pos] = True
+
+        return x_t, corruption_masks

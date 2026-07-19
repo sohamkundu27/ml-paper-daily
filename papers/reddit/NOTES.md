@@ -54,3 +54,20 @@ The authors propose ReDDiT (Rehashing Noise for Discrete Diffusion Transformer),
 - No learned denoiser or reverse process
 - No actual image data or training
 - Pure numpy implementation (no pytorch)
+
+### Pass 2: ✅ Complete
+**What works:**
+- `forward_with_rehash(x0, t, num_corrupts)` implements randomized multi-index corruption: randomly selects `num_corrupts` positions per sample and corrupts only those, leaving others unchanged
+- Returns both noised tokens and a boolean corruption mask
+- `forward_batch_with_rehash(x0, timesteps, num_corrupts)` handles batch processing with per-sample timesteps and independent random corruption patterns
+- Creates diverse training paths: different samples and different calls produce different corruption patterns even from the same x0
+- Path diversity verified via entropy: corrupted positions show non-zero entropy but constrained (not fully uniform)
+- Unmasked positions preserved unchanged from x0
+- Full test suite: 5 new tests verify basic functionality, corruption count control, batch processing, path diversity (entropy > 0.1), and position preservation
+
+**Simplified/stubbed:**
+- Simple uniform random position selection (paper may use more sophisticated scheduling)
+- No learned corruption pattern adaptation (fully random selection)
+- Single corruption per position per step (not nested/hierarchical)
+- Corruption mask returned but not used in training loop (would need reverse process to leverage)
+- Still numpy-only, no actual training loop or model integration
