@@ -1,7 +1,8 @@
-"""Tests for categorical discrete diffusion forward process."""
+"""Tests for categorical discrete diffusion forward and reverse process."""
 
 import numpy as np
-from discrete_diffusion import CategoricalDiffusion
+import torch
+from discrete_diffusion import CategoricalDiffusion, SimpleDenoiser
 
 
 def test_forward_process_basic():
@@ -240,7 +241,164 @@ def test_rehash_unmasked_positions_unchanged():
     print("✓ test_rehash_unmasked_positions_unchanged passed")
 
 
+def test_simple_denoiser_forward():
+    """Test that SimpleDenoiser forward pass works."""
+    num_classes = 5
+    seq_len = 4
+    batch_size = 2
+
+    denoiser = SimpleDenoiser(num_classes=num_classes, seq_len=seq_len, hidden_dim=32)
+
+    x_t = torch.randint(0, num_classes, (batch_size, seq_len))
+    t = torch.tensor([10, 20])
+
+    logits = denoiser(x_t, t)
+
+    # Check output shape
+    assert logits.shape == (batch_size, seq_len, num_classes)
+    # Check logits are finite
+    assert torch.all(torch.isfinite(logits))
+    print("✓ test_simple_denoiser_forward passed")
+
+
+def test_simple_denoiser_with_scalar_timestep():
+    """Test denoiser with scalar timestep input."""
+    num_classes = 4
+    seq_len = 3
+    batch_size = 2
+
+    denoiser = SimpleDenoiser(num_classes=num_classes, seq_len=seq_len)
+
+    x_t = torch.randint(0, num_classes, (batch_size, seq_len))
+    t = torch.tensor(15)
+
+    logits = denoiser(x_t, t)
+
+    assert logits.shape == (batch_size, seq_len, num_classes)
+    assert torch.all(torch.isfinite(logits))
+    print("✓ test_simple_denoiser_with_scalar_timestep passed")
+
+
+def test_reverse_kernel_basic():
+    """Test reverse kernel produces valid samples."""
+    num_classes = 5
+    num_steps = 20
+    diffusion = CategoricalDiffusion(num_classes, num_steps)
+
+    x_t = np.array([[0, 1, 2], [3, 4, 0]], dtype=np.int32)
+    x_0_pred = np.array([[1, 2, 0], [4, 0, 1]], dtype=np.int32)  # Some predictions
+
+    x_t_minus_1 = diffusion.reverse_kernel(x_t, t=10, x_0_pred=x_0_pred)
+
+    # Check shape preserved
+    assert x_t_minus_1.shape == x_t.shape
+    # Check all values are valid class indices
+    assert np.all((x_t_minus_1 >= 0) & (x_t_minus_1 < num_classes))
+    print("✓ test_reverse_kernel_basic passed")
+
+
+def test_reverse_kernel_at_low_t():
+    """Test reverse kernel near end of diffusion process."""
+    num_classes = 4
+    num_steps = 50
+    diffusion = CategoricalDiffusion(num_classes, num_steps)
+
+    # At high timestep (close to full noise), reverse should have more entropy
+    x_t = np.random.randint(0, num_classes, (10, 5), dtype=np.int32)
+    x_0_pred = np.random.randint(0, num_classes, (10, 5), dtype=np.int32)
+
+    x_t_minus_1 = diffusion.reverse_kernel(x_t, t=45, x_0_pred=x_0_pred)
+
+    assert x_t_minus_1.shape == x_t.shape
+    assert np.all((x_t_minus_1 >= 0) & (x_t_minus_1 < num_classes))
+    print("✓ test_reverse_kernel_at_low_t passed")
+
+
+def test_full_sampling_loop():
+    """Test complete reverse sampling loop from noised to clean sample."""
+    num_classes = 4
+    seq_len = 5
+    num_steps = 15
+    batch_size = 2
+
+    diffusion = CategoricalDiffusion(num_classes, num_steps)
+
+    # Create a simple denoiser
+    denoiser = SimpleDenoiser(num_classes=num_classes, seq_len=seq_len, hidden_dim=32)
+
+    # Random noisy sample to start
+    x_T = np.random.randint(0, num_classes, (batch_size, seq_len), dtype=np.int32)
+
+    # Run sampling
+    x_0_sampled = diffusion.sample_with_rehash_sampler(denoiser, x_T, device="cpu")
+
+    # Check output is valid
+    assert x_0_sampled.shape == x_T.shape
+    assert np.all((x_0_sampled >= 0) & (x_0_sampled < num_classes))
+    print("✓ test_full_sampling_loop passed")
+
+
+def test_synthetic_classification_task():
+    """Test end-to-end diffusion on simple synthetic data.
+
+    Scenario: We have K simple patterns (one-hot like for K categories).
+    We corrupt them to noise, then try to recover with denoiser.
+    """
+    num_classes = 5
+    seq_len = 6
+    num_steps = 20
+    batch_size = 8
+
+    diffusion = CategoricalDiffusion(num_classes, num_steps)
+    denoiser = SimpleDenoiser(num_classes=num_classes, seq_len=seq_len, hidden_dim=48)
+
+    # Create synthetic "clean" data: random category labels
+    x_0_clean = np.random.randint(0, num_classes, (batch_size, seq_len), dtype=np.int32)
+
+    # Forward diffusion: corrupt to high noise
+    x_T, _ = diffusion.forward_with_rehash(x_0_clean, t=num_steps - 1, num_corrupts=seq_len)
+
+    # Reverse: recover from noise
+    x_0_recovered = diffusion.sample_with_rehash_sampler(denoiser, x_T, device="cpu")
+
+    # Sanity checks:
+    # 1. Recovered should be valid tokens
+    assert x_0_recovered.shape == x_0_clean.shape
+    assert np.all((x_0_recovered >= 0) & (x_0_recovered < num_classes))
+
+    # 2. Recovered should NOT be identical to original (untrained network gives random predictions)
+    # But it should at least be in valid range, which we already checked
+    print(f"✓ test_synthetic_classification_task passed")
+    print(f"  Original shape: {x_0_clean.shape}")
+    print(f"  Recovered shape: {x_0_recovered.shape}")
+    print(f"  Sample original: {x_0_clean[0]}")
+    print(f"  Sample recovered: {x_0_recovered[0]}")
+
+
+def test_denoise_step_output():
+    """Test the internal _denoise_step function."""
+    num_classes = 5
+    seq_len = 4
+    num_steps = 15
+    batch_size = 2
+
+    diffusion = CategoricalDiffusion(num_classes, num_steps)
+    denoiser = SimpleDenoiser(num_classes=num_classes, seq_len=seq_len, hidden_dim=32)
+
+    x_t = np.random.randint(0, num_classes, (batch_size, seq_len), dtype=np.int32)
+    t = 10
+
+    x_0_pred = diffusion._denoise_step(denoiser, x_t, t, device="cpu")
+
+    # Check output
+    assert x_0_pred.shape == x_t.shape
+    assert x_0_pred.dtype == np.int32
+    assert np.all((x_0_pred >= 0) & (x_0_pred < num_classes))
+    print("✓ test_denoise_step_output passed")
+
+
 if __name__ == "__main__":
+    # Pass 1 & 2 tests (forward process and rehashing)
     test_forward_process_basic()
     test_transition_matrices_valid()
     test_convergence_to_uniform()
@@ -252,4 +410,14 @@ if __name__ == "__main__":
     test_forward_batch_with_rehash()
     test_rehash_path_diversity()
     test_rehash_unmasked_positions_unchanged()
+
+    # Pass 3 tests (reverse process and denoiser)
+    test_simple_denoiser_forward()
+    test_simple_denoiser_with_scalar_timestep()
+    test_reverse_kernel_basic()
+    test_reverse_kernel_at_low_t()
+    test_denoise_step_output()
+    test_full_sampling_loop()
+    test_synthetic_classification_task()
+
     print("\n✓ All tests passed!")

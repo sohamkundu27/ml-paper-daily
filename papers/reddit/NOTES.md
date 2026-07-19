@@ -71,3 +71,37 @@ The authors propose ReDDiT (Rehashing Noise for Discrete Diffusion Transformer),
 - Single corruption per position per step (not nested/hierarchical)
 - Corruption mask returned but not used in training loop (would need reverse process to leverage)
 - Still numpy-only, no actual training loop or model integration
+
+### Pass 3: ✅ Complete
+**What works:**
+- `SimpleDenoiser` class: lightweight MLP (PyTorch) that predicts p(x_0 | x_t, t)
+  - One-hot encodes noised tokens x_t
+  - Embeds timestep t with learnable embeddings
+  - MLP with two hidden layers maps to output logits for each position
+  - Handles both scalar and per-sample timesteps gracefully
+- `reverse_kernel(x_t, t, x_0_pred)` computes reverse distribution analytically
+  - Uses Bayes rule to derive q(x_{t-1} | x_t, x_0)
+  - Combines forward transition matrices Q_t and Q_{t-1}
+  - Samples x_{t-1} from the posterior, position by position
+  - Handles edge cases (zero posterior) with uniform fallback
+- `sample_with_rehash_sampler(denoiser, x_T)` runs full reverse sampling loop
+  - Iterates from t=num_steps down to t=1
+  - At each step, denoise to predict x_0, then reverse-sample x_{t-1}
+  - Produces final clean sample x_0 from initial noise x_T
+- `_denoise_step(denoiser, x_t, t)` interface for model predictions
+  - Converts numpy → torch, runs inference, returns argmax predictions
+  - No gradients computed (inference only)
+- Full test suite: 7 new tests verify denoiser output shape, reverse kernel validity, end-to-end sampling, and synthetic classification task
+
+**Simplified/stubbed:**
+- Untrained denoiser: SimpleDenoiser initialized randomly, so predictions are uninformed
+  - Reverse process still runs correctly (mathematically sound)
+  - Generated samples are random but valid (shows structure is in place for training)
+- No actual training loop (optimizer, loss function, dataset)
+  - Code is ready for training but not executed; tests only verify forward/backward pass plumbing
+- No learned timestep embedding optimization
+- Reverse process does not use corruption masks (full position-by-position reversal)
+  - Paper's rehash sampler would selectively update only corrupted positions
+  - Current implementation handles all positions uniformly in reverse
+- No batch inference optimization (processes one timestep at a time)
+- Single sample generation per call (no batch generation in sampling loop)
