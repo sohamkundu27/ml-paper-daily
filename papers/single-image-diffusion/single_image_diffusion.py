@@ -91,6 +91,167 @@ class PatchExtractor:
         return distances[indices], indices
 
 
+class SimplePCA:
+    """Simple PCA implementation using SVD."""
+
+    def __init__(self, n_components):
+        self.n_components = n_components
+        self.mean = None
+        self.components = None
+        self.explained_variance = None
+
+    def fit(self, X):
+        """Fit PCA on data X.
+
+        Args:
+            X: array of shape (n_samples, n_features)
+        """
+        self.mean = np.mean(X, axis=0)
+        X_centered = X - self.mean
+
+        # SVD
+        U, S, Vt = np.linalg.svd(X_centered, full_matrices=False)
+        self.components = Vt[: self.n_components]
+        self.explained_variance = (S ** 2) / (X.shape[0] - 1)
+
+        return self
+
+    def transform(self, X):
+        """Project X onto PCA components.
+
+        Args:
+            X: array of shape (n_samples, n_features) or (n_features,)
+
+        Returns:
+            X_transformed: projected data
+        """
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
+        X_centered = X - self.mean
+        return X_centered @ self.components.T
+
+    def inverse_transform(self, X_transformed):
+        """Reconstruct from PCA space.
+
+        Args:
+            X_transformed: array of shape (n_samples, n_components) or (n_components,)
+
+        Returns:
+            X_reconstructed: reconstructed data in original space
+        """
+        if X_transformed.ndim == 1:
+            X_transformed = X_transformed.reshape(1, -1)
+        return X_transformed @ self.components + self.mean
+
+
+class ClosedFormDenoiser:
+    """Closed-form denoiser using patch statistics (Wiener filter)."""
+
+    def __init__(self, mean, cov, noise_level, pca_components=None):
+        """
+        Args:
+            mean: mean patch vector (shape: patch_dim,)
+            cov: covariance matrix (shape: patch_dim, patch_dim)
+            noise_level: noise standard deviation
+            pca_components: if not None, use PCA for dimension reduction
+        """
+        self.mean = mean
+        self.cov = cov
+        self.noise_level = noise_level
+        self.pca_components = pca_components
+        self.patch_dim = mean.shape[0]
+
+        # Setup PCA if dimension reduction is requested
+        self.pca = None
+        self.reduced_mean = None
+        self.reduced_cov = None
+
+        if pca_components is not None and pca_components < self.patch_dim:
+            # For training PCA, we need the original patch data
+            # This will be set in fit_pca() method
+            pass
+        else:
+            # Use full covariance
+            self.reduced_mean = mean.copy()
+            self.reduced_cov = cov.copy()
+
+    def fit_pca(self, patch_data):
+        """Fit PCA on patch data for dimension reduction.
+
+        Args:
+            patch_data: array of shape (num_patches, patch_dim)
+        """
+        if self.pca_components is None or self.pca_components >= self.patch_dim:
+            return
+
+        # Fit PCA
+        self.pca = SimplePCA(self.pca_components)
+        self.pca.fit(patch_data)
+
+        # Transform statistics to PCA space
+        mean_reduced = self.pca.transform(self.mean.reshape(1, -1))[0]
+        patch_data_reduced = self.pca.transform(patch_data)
+        cov_reduced = np.cov(patch_data_reduced.T)
+
+        self.reduced_mean = mean_reduced
+        self.reduced_cov = cov_reduced
+
+    def denoise_patch(self, noisy_patch):
+        """Denoise a single patch using Wiener filter.
+
+        Args:
+            noisy_patch: noisy patch vector (shape: patch_dim,)
+
+        Returns:
+            denoised_patch: denoised patch vector
+        """
+        # Use PCA-reduced space if available, otherwise full space
+        if self.pca is not None:
+            noisy_reduced = self.pca.transform(noisy_patch.reshape(1, -1))[0]
+            mean_to_use = self.reduced_mean
+            cov_to_use = self.reduced_cov
+        else:
+            noisy_reduced = noisy_patch
+            mean_to_use = self.mean
+            cov_to_use = self.cov
+
+        sigma_sq = self.noise_level ** 2
+
+        # Wiener filter: denoised = mean + cov @ (cov + sigma^2*I)^{-1} @ (noisy - mean)
+        posterior_cov_inv = np.linalg.inv(cov_to_use + sigma_sq * np.eye(mean_to_use.shape[0]))
+        denoised_reduced = (
+            mean_to_use
+            + cov_to_use @ posterior_cov_inv @ (noisy_reduced - mean_to_use)
+        )
+
+        # Transform back to original space if using PCA
+        if self.pca is not None:
+            denoised = self.pca.inverse_transform(denoised_reduced.reshape(1, -1))[0]
+        else:
+            denoised = denoised_reduced
+
+        return denoised
+
+    def score_function(self, noisy_patch):
+        """Compute score function ∇_x log p(x | noisy_patch).
+
+        Args:
+            noisy_patch: noisy patch vector (shape: patch_dim,)
+
+        Returns:
+            score: score vector (shape: patch_dim,)
+        """
+        sigma_sq = self.noise_level ** 2
+
+        # Denoise the patch
+        denoised = self.denoise_patch(noisy_patch)
+
+        # Score is (denoised - noisy) / sigma^2
+        score = (denoised - noisy_patch) / sigma_sq
+
+        return score
+
+
 def add_gaussian_noise(image, noise_level):
     """Add Gaussian noise to an image.
 
