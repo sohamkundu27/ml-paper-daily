@@ -79,3 +79,32 @@ This paper addresses generative modeling of images using a single reference imag
 - No real image experiments or applications yet
 
 **Why these simplifications:** Pass 2 focuses on the core denoising mechanism. The diffusion loop, guidance, and full end-to-end generation are deferred to Passes 3 and 4. Grayscale is sufficient for validating the method; RGB can be added later if needed. PCA is optional and the denoiser works with full covariance.
+
+### After Pass 3
+
+**Implemented:**
+- `DiffusionSampler` class implementing reverse diffusion process for image generation
+- Linear noise schedule generator for controlling noise decay across iterations
+- Iterative sampling loop that extracts patches, applies denoiser score function, and reconstructs image
+- Patch extraction from noisy images using sliding windows
+- Image reconstruction from overlapping patches with averaging to handle boundary effects
+- Generation from random noise with configurable initial noise
+- Full integration of denoiser into sampling pipeline
+- Comprehensive test suite covering noise scheduling, generation, reconstruction, and multi-generation diversity
+
+**Experimental Results:**
+- Successfully generates images from pure noise with reasonable statistics
+- Generated images have mean ≈ 0.5 and std ≈ 0.5 (reasonable for [0,1] range)
+- Multiple generations from same sampler produce different outputs (MSE diff ~0.48)
+- Reconstruction from overlapping patches produces coherent images
+- All sampling operations remain numerically stable
+
+**Simplified/Stubbed:**
+- No explicit guidance mechanism yet (guidance_scale parameter present but unused)
+- Step size (0.1) is fixed, not adaptive per noise level
+- Noise injection between steps is minimal (only 1% of theoretical noise level)
+- No application-specific demos yet (unconditional generation only)
+- Patches still grayscale only
+- No comparison with reference image statistics
+
+**Why these simplifications:** Pass 3 focuses on getting the core diffusion loop working end-to-end. Guidance and adaptive step sizing are advanced features that can be added in Pass 4. The minimal noise injection is sufficient for preventing mode collapse while keeping the process stable. Applications and comparisons are deferred to the final demo pass.

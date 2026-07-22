@@ -284,3 +284,138 @@ def create_simple_image(size=32):
     image = image * (0.5 + 0.5 * gradient[:, np.newaxis])
 
     return np.clip(image, 0, 1)
+
+
+def linear_noise_schedule(num_steps, min_sigma=0.01, max_sigma=1.0):
+    """Create a linear noise schedule.
+
+    Args:
+        num_steps: number of diffusion steps
+        min_sigma: minimum noise level (at end of process)
+        max_sigma: maximum noise level (at start of process)
+
+    Returns:
+        sigmas: array of shape (num_steps,) with noise levels from high to low
+    """
+    return np.linspace(max_sigma, min_sigma, num_steps)
+
+
+class DiffusionSampler:
+    """Diffusion-based sampler for generating images from denoiser."""
+
+    def __init__(self, denoiser, patch_size=5, num_steps=50, noise_schedule=None):
+        """
+        Args:
+            denoiser: ClosedFormDenoiser instance
+            patch_size: size of patches used in denoiser
+            num_steps: number of diffusion steps
+            noise_schedule: array of noise levels; if None, uses linear schedule
+        """
+        self.denoiser = denoiser
+        self.patch_size = patch_size
+        self.num_steps = num_steps
+
+        if noise_schedule is None:
+            self.noise_schedule = linear_noise_schedule(num_steps)
+        else:
+            self.noise_schedule = noise_schedule
+
+    def sample(self, image_size, initial_noise=None, guidance_scale=0.0):
+        """Generate an image through reverse diffusion process.
+
+        Args:
+            image_size: (height, width) of generated image
+            initial_noise: initial noise image; if None, use random noise
+            guidance_scale: guidance strength for conditional generation (0 = unconditional)
+
+        Returns:
+            generated_image: generated image of shape (height, width) in [0, 1]
+        """
+        if initial_noise is None:
+            x = np.random.randn(*image_size)
+        else:
+            x = initial_noise.copy()
+
+        # Scale to initial noise level
+        x = x * self.noise_schedule[0]
+
+        # Reverse diffusion loop
+        for step in range(self.num_steps):
+            sigma_t = self.noise_schedule[step]
+
+            # Extract patches from current noisy image
+            patches = self._extract_patches_from_image(x)
+
+            # Denoise patches using score function
+            denoised_patches = []
+            for patch in patches:
+                # Compute score (denoising direction)
+                score = self.denoiser.score_function(patch)
+                # Update patch using score
+                # step_size controls how much we move in the denoising direction
+                step_size = 0.1
+                denoised_patch = patch + step_size * score
+
+                denoised_patches.append(denoised_patch)
+
+            # Reconstruct image from denoised patches
+            x = self._reconstruct_image_from_patches(denoised_patches, image_size)
+
+            # Decay noise level (optional noise injection for better generation)
+            if step < self.num_steps - 1:
+                next_sigma = self.noise_schedule[step + 1]
+                # Add small noise to prevent mode collapse
+                noise_level = np.sqrt(max(0, sigma_t**2 - next_sigma**2))
+                x = x + np.random.randn(*image_size) * noise_level * 0.01
+
+        # Clip to valid range
+        return np.clip(x, 0, 1)
+
+    def _extract_patches_from_image(self, image):
+        """Extract patches from image using sliding window.
+
+        Args:
+            image: numpy array of shape (H, W)
+
+        Returns:
+            patches: list of flattened patch vectors
+        """
+        h, w = image.shape
+        patches = []
+
+        for i in range(max(0, h - self.patch_size + 1)):
+            for j in range(max(0, w - self.patch_size + 1)):
+                patch = image[i:i+self.patch_size, j:j+self.patch_size].copy()
+                if patch.shape == (self.patch_size, self.patch_size):
+                    patches.append(patch.flatten())
+
+        return patches
+
+    def _reconstruct_image_from_patches(self, patches, image_size):
+        """Reconstruct image from overlapping patches by averaging.
+
+        Args:
+            patches: list of flattened patch vectors
+            image_size: (height, width) of reconstructed image
+
+        Returns:
+            reconstructed_image: numpy array of shape image_size
+        """
+        h, w = image_size
+        reconstructed = np.zeros(image_size)
+        counts = np.zeros(image_size)
+
+        patch_idx = 0
+        for i in range(max(0, h - self.patch_size + 1)):
+            for j in range(max(0, w - self.patch_size + 1)):
+                if patch_idx < len(patches):
+                    patch = patches[patch_idx].reshape(self.patch_size, self.patch_size)
+                    reconstructed[i:i+self.patch_size, j:j+self.patch_size] += patch
+                    counts[i:i+self.patch_size, j:j+self.patch_size] += 1
+                    patch_idx += 1
+
+        # Average overlapping regions
+        mask = counts > 0
+        reconstructed[mask] /= counts[mask]
+
+        return reconstructed
