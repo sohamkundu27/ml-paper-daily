@@ -227,6 +227,125 @@ class MomentumEncoder(nn.Module):
         return z_online, z_momentum
 
 
+class PointCloudEncoder(nn.Module):
+    """PointNet-style encoder with optional orthogonal offset branch."""
+
+    def __init__(self, input_dim: int = 3, hidden_dim: int = 64, output_dim: int = 128, dropout: float = 0.1):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, output_dim)
+        )
+        self.pool = nn.AdaptiveMaxPool1d(1)
+
+    def forward(self, points: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass returning global features and per-point features.
+
+        Args:
+            points: (batch_size, num_points, input_dim) point coordinates
+
+        Returns:
+            cloud_feature: (batch_size, output_dim) global point cloud feature
+            per_point_features: (batch_size, num_points, output_dim) per-point features
+        """
+        per_point_features = self.mlp(points)
+        batch_size = per_point_features.size(0)
+        per_point_features_t = per_point_features.transpose(1, 2)
+        cloud_feature = self.pool(per_point_features_t).squeeze(-1)
+
+        return cloud_feature, per_point_features
+
+
+class OrthogonalOffsetBranch(nn.Module):
+    """Predicts per-point orthogonal offsets for geometry-aware learning."""
+
+    def __init__(self, feature_dim: int = 128, hidden_dim: int = 64):
+        super().__init__()
+        self.offset_head = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 3)
+        )
+
+    def forward(self, per_point_features: torch.Tensor) -> torch.Tensor:
+        """
+        Predict per-point offset vectors.
+
+        Args:
+            per_point_features: (batch_size, num_points, feature_dim)
+
+        Returns:
+            offsets: (batch_size, num_points, 3) offset vectors
+        """
+        offsets = self.offset_head(per_point_features)
+        return offsets
+
+
+def compute_local_normals(points: torch.Tensor, k: int = 8) -> torch.Tensor:
+    """
+    Estimate local surface normals using k-nearest neighbors PCA.
+
+    Args:
+        points: (batch_size, num_points, 3) point coordinates
+        k: number of nearest neighbors for local geometry
+
+    Returns:
+        normals: (batch_size, num_points, 3) estimated normal vectors
+    """
+    batch_size, num_points, _ = points.shape
+    normals = torch.zeros_like(points)
+
+    for b in range(batch_size):
+        cloud = points[b]  # (num_points, 3)
+
+        for i in range(num_points):
+            center = cloud[i:i+1]  # (1, 3)
+            distances = torch.norm(cloud - center, dim=1)
+
+            if num_points > k:
+                _, nearest_indices = torch.topk(distances, k, largest=False)
+            else:
+                nearest_indices = torch.arange(num_points, device=points.device)
+
+            neighbors = cloud[nearest_indices]  # (k, 3)
+            centered = neighbors - neighbors.mean(dim=0, keepdim=True)
+
+            _, _, V = torch.svd(centered)
+            normal = V[:, -1]  # Last singular vector = normal to the plane
+            normals[b, i] = normal
+
+    return normals
+
+
+def geometry_aware_loss(offsets: torch.Tensor, points: torch.Tensor, lambda_geo: float = 0.1) -> torch.Tensor:
+    """
+    Geometry-aware regularization loss encouraging offsets to align with surface normals.
+
+    Args:
+        offsets: (batch_size, num_points, 3) predicted offset vectors
+        points: (batch_size, num_points, 3) point coordinates
+        lambda_geo: weight for geometry loss
+
+    Returns:
+        loss: scalar geometry regularization loss
+    """
+    normals = compute_local_normals(points, k=min(8, points.size(1)))
+
+    offset_norms = torch.norm(offsets, dim=2, keepdim=True) + 1e-8
+    offset_normalized = offsets / offset_norms
+
+    alignment = torch.abs((offset_normalized * normals).sum(dim=2))
+    geometry_loss = lambda_geo * (1.0 - alignment.mean())
+
+    return geometry_loss
+
+
 class ContrastiveTrainer:
     """Trainer for instance discrimination with contrastive learning."""
 
@@ -334,3 +453,108 @@ class ContrastiveTrainer:
         mean_neg_sim = np.mean(neg_sims)
 
         return mean_pos_sim, mean_neg_sim
+
+
+class GeometryAwareTrainer:
+    """Trainer combining instance discrimination with geometry-aware offset learning."""
+
+    def __init__(self, encoder: nn.Module, offset_branch: nn.Module, device: str = "cpu",
+                 lr: float = 1e-3, lambda_geo: float = 0.1, use_momentum: bool = False):
+        self.device = device
+        self.encoder = encoder.to(device)
+        self.offset_branch = offset_branch.to(device)
+        self.use_momentum = use_momentum
+        if use_momentum:
+            self.momentum_encoder_wrapper = MomentumEncoder(encoder, momentum=0.999).to(device)
+        self.loss_fn = NTXentLoss(temperature=0.07)
+        self.lambda_geo = lambda_geo
+
+        # Combined optimizer for encoder and offset branch
+        params = list(encoder.parameters()) + list(offset_branch.parameters())
+        self.optimizer = torch.optim.Adam(params, lr=lr)
+
+    def train_step(self, cloud1: torch.Tensor, cloud2: torch.Tensor) -> Tuple[float, float, float]:
+        """
+        Single training step on a positive pair with geometry-aware loss.
+
+        Args:
+            cloud1: (batch_size, num_points, 3) first augmentation
+            cloud2: (batch_size, num_points, 3) second augmentation
+
+        Returns:
+            total_loss: combined loss value
+            contrastive_loss: instance discrimination loss
+            geo_loss: geometry-aware regularization loss
+        """
+        cloud1 = cloud1.to(self.device)
+        cloud2 = cloud2.to(self.device)
+
+        cloud1 = normalize_points(cloud1)
+        cloud2 = normalize_points(cloud2)
+
+        # Forward pass through encoder (returns global feature + per-point features)
+        z1_global, z1_per_point = self.encoder(cloud1)
+        z2_global, z2_per_point = self.encoder(cloud2)
+
+        # Contrastive loss on global features
+        contrastive_loss = self.loss_fn(z1_global, z2_global)
+
+        # Geometry-aware loss from offset predictions
+        offsets1 = self.offset_branch(z1_per_point)
+        offsets2 = self.offset_branch(z2_per_point)
+
+        geo_loss1 = geometry_aware_loss(offsets1, cloud1, lambda_geo=self.lambda_geo)
+        geo_loss2 = geometry_aware_loss(offsets2, cloud2, lambda_geo=self.lambda_geo)
+        geo_loss = (geo_loss1 + geo_loss2) / 2.0
+
+        # Combined loss
+        total_loss = contrastive_loss + geo_loss
+
+        # Backward pass
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        self.optimizer.step()
+
+        # Update momentum encoder if used
+        if self.use_momentum:
+            self.momentum_encoder_wrapper.update_momentum()
+
+        return total_loss.item(), contrastive_loss.item(), geo_loss.item()
+
+    def get_offset_patterns(self, dataset: PointCloudDataset, num_samples: int = 4) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Extract offset patterns learned by the model.
+
+        Args:
+            dataset: PointCloudDataset instance
+            num_samples: number of samples to visualize
+
+        Returns:
+            points_batch: (num_samples, num_points, 3) batch of point clouds
+            offsets_batch: (num_samples, num_points, 3) batch of learned offsets
+        """
+        self.encoder.eval()
+        self.offset_branch.eval()
+
+        points_list = []
+        offsets_list = []
+
+        with torch.no_grad():
+            for i in range(min(num_samples, len(dataset))):
+                cloud, _ = dataset.get_positive_pair(i)
+                cloud_t = torch.from_numpy(cloud).unsqueeze(0).to(self.device)
+                cloud_t = normalize_points(cloud_t)
+
+                _, per_point_features = self.encoder(cloud_t)
+                offsets = self.offset_branch(per_point_features)
+
+                points_list.append(cloud_t.cpu())
+                offsets_list.append(offsets.cpu())
+
+        self.encoder.train()
+        self.offset_branch.train()
+
+        points_batch = torch.cat(points_list, dim=0)
+        offsets_batch = torch.cat(offsets_list, dim=0)
+
+        return points_batch, offsets_batch

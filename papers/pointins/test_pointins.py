@@ -7,7 +7,11 @@ from pointins import (
     normalize_points,
     NTXentLoss,
     MomentumEncoder,
-    ContrastiveTrainer
+    ContrastiveTrainer,
+    PointCloudEncoder,
+    OrthogonalOffsetBranch,
+    geometry_aware_loss,
+    GeometryAwareTrainer
 )
 
 
@@ -201,6 +205,116 @@ def test_contrastive_training():
     print(f"  Negative similarity: {neg_sim_before:.4f} -> {neg_sim_after:.4f}")
 
 
+def test_offset_branch():
+    """Test orthogonal offset branch."""
+    offset_branch = OrthogonalOffsetBranch(feature_dim=128, hidden_dim=64)
+
+    batch_size = 4
+    num_points = 256
+    per_point_features = torch.randn(batch_size, num_points, 128)
+
+    offsets = offset_branch(per_point_features)
+
+    assert offsets.shape == (batch_size, num_points, 3)
+    assert not torch.isnan(offsets).any()
+    print("✓ Offset branch test passed")
+
+
+def test_geometry_aware_loss():
+    """Test geometry-aware loss computation."""
+    batch_size = 4
+    num_points = 128
+    points = torch.randn(batch_size, num_points, 3)
+    offsets = torch.randn(batch_size, num_points, 3)
+
+    loss = geometry_aware_loss(offsets, points, lambda_geo=0.1)
+
+    assert loss.item() > 0
+    assert not torch.isnan(loss)
+    print(f"✓ Geometry-aware loss test passed (loss: {loss.item():.4f})")
+
+
+def test_point_cloud_encoder():
+    """Test PointCloudEncoder with per-point features."""
+    encoder = PointCloudEncoder(input_dim=3, hidden_dim=64, output_dim=128)
+
+    batch_size = 4
+    num_points = 256
+    points = torch.randn(batch_size, num_points, 3)
+
+    cloud_feat, per_point_feat = encoder(points)
+
+    assert cloud_feat.shape == (batch_size, 128)
+    assert per_point_feat.shape == (batch_size, num_points, 128)
+    print("✓ PointCloudEncoder test passed")
+
+
+def test_geometry_aware_training():
+    """Test geometry-aware training with combined losses."""
+    device = "cpu"
+    encoder = PointCloudEncoder(input_dim=3, hidden_dim=64, output_dim=128)
+    offset_branch = OrthogonalOffsetBranch(feature_dim=128, hidden_dim=64)
+    trainer = GeometryAwareTrainer(encoder, offset_branch, device=device, lr=1e-2, lambda_geo=0.1)
+    dataset = PointCloudDataset(num_objects=12, num_points=128)
+
+    num_steps = 30
+    total_losses = []
+    contrastive_losses = []
+    geo_losses = []
+
+    for step in range(num_steps):
+        idx = step % len(dataset)
+        cloud1, cloud2 = dataset.get_positive_pair(idx)
+
+        cloud1_t = torch.from_numpy(cloud1).unsqueeze(0)
+        cloud2_t = torch.from_numpy(cloud2).unsqueeze(0)
+
+        total_loss, cont_loss, geo_loss = trainer.train_step(cloud1_t, cloud2_t)
+        total_losses.append(total_loss)
+        contrastive_losses.append(cont_loss)
+        geo_losses.append(geo_loss)
+
+    loss_ratio = np.mean(total_losses[:5]) / (np.mean(total_losses[-5:]) + 1e-8)
+    assert loss_ratio > 1.0, f"Loss should decrease (ratio: {loss_ratio:.2f})"
+
+    print(f"✓ Geometry-aware training test passed")
+    print(f"  Total loss: {total_losses[0]:.4f} -> {total_losses[-1]:.4f} (ratio: {loss_ratio:.2f}x)")
+    print(f"  Contrastive: {np.mean(contrastive_losses[:5]):.4f} -> {np.mean(contrastive_losses[-5:]):.4f}")
+    print(f"  Geometry: {np.mean(geo_losses[:5]):.4f} -> {np.mean(geo_losses[-5:]):.4f}")
+
+
+def test_offset_patterns():
+    """Test extraction of learned offset patterns."""
+    device = "cpu"
+    encoder = PointCloudEncoder(input_dim=3, hidden_dim=64, output_dim=128)
+    offset_branch = OrthogonalOffsetBranch(feature_dim=128, hidden_dim=64)
+    trainer = GeometryAwareTrainer(encoder, offset_branch, device=device, lr=5e-3)
+    dataset = PointCloudDataset(num_objects=8, num_points=128)
+
+    # Train briefly with lower learning rate for stability
+    for step in range(20):
+        idx = step % len(dataset)
+        cloud1, cloud2 = dataset.get_positive_pair(idx)
+        cloud1_t = torch.from_numpy(cloud1).unsqueeze(0)
+        cloud2_t = torch.from_numpy(cloud2).unsqueeze(0)
+        trainer.train_step(cloud1_t, cloud2_t)
+
+    # Extract offset patterns
+    points_batch, offsets_batch = trainer.get_offset_patterns(dataset, num_samples=3)
+
+    assert points_batch.shape[0] == 3
+    assert points_batch.shape[1] == 128
+    assert offsets_batch.shape == points_batch.shape
+
+    # Check that offsets are being learned (have non-zero values)
+    offset_magnitudes = torch.norm(offsets_batch, dim=2)
+    assert (offset_magnitudes > 0).any(), "Offsets should be non-zero"
+    assert not torch.isnan(offsets_batch).any(), "Offsets should not be NaN"
+
+    print(f"✓ Offset patterns test passed")
+    print(f"  Offset magnitude range: [{offset_magnitudes.min():.4f}, {offset_magnitudes.max():.4f}]")
+
+
 if __name__ == "__main__":
     print("Running PointINS Pass 1 tests...\n")
     test_augmentation()
@@ -214,5 +328,12 @@ if __name__ == "__main__":
     test_ntxent_loss()
     test_momentum_encoder()
     test_contrastive_training()
+
+    print("\nRunning PointINS Pass 3 tests...\n")
+    test_offset_branch()
+    test_geometry_aware_loss()
+    test_point_cloud_encoder()
+    test_geometry_aware_training()
+    test_offset_patterns()
 
     print("\n✓ All tests passed!")
