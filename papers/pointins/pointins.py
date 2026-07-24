@@ -129,3 +129,208 @@ def normalize_points(points: torch.Tensor) -> torch.Tensor:
     mean = points.mean(dim=1, keepdim=True)
     std = points.std(dim=1, keepdim=True)
     return (points - mean) / (std + 1e-6)
+
+
+class NTXentLoss(nn.Module):
+    """NT-Xent (Normalized Temperature-scaled Cross Entropy) loss for contrastive learning."""
+
+    def __init__(self, temperature: float = 0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, z_i: torch.Tensor, z_j: torch.Tensor) -> torch.Tensor:
+        """
+        Compute contrastive loss for positive pairs.
+
+        For batch_size > 1: uses full NT-Xent with batch negatives
+        For batch_size = 1: uses simplified pairwise loss
+
+        Args:
+            z_i: (batch_size, feature_dim) representations from view i
+            z_j: (batch_size, feature_dim) representations from view j
+
+        Returns:
+            loss: scalar loss value
+        """
+        batch_size = z_i.size(0)
+
+        # Normalize features
+        z_i = torch.nn.functional.normalize(z_i, dim=1)
+        z_j = torch.nn.functional.normalize(z_j, dim=1)
+
+        if batch_size == 1:
+            # For single pair, use simple negative of cosine similarity
+            # This encourages z_i and z_j to be similar (cosine similarity close to 1)
+            sim = torch.nn.functional.cosine_similarity(z_i, z_j)
+            loss = 1.0 - sim
+            return loss.mean()
+
+        # For batch_size > 1: use full NT-Xent
+        # Concatenate: (2*batch_size, feature_dim)
+        z = torch.cat([z_i, z_j], dim=0)
+
+        # Compute similarity matrix: (2*batch_size, 2*batch_size)
+        sim_matrix = torch.mm(z, z.T) / self.temperature
+
+        # Create labels
+        labels = torch.arange(batch_size, dtype=torch.long, device=z.device)
+        labels = torch.cat([labels + batch_size, labels], dim=0)
+
+        # Mask out self-similarity (diagonal)
+        mask = torch.eye(2 * batch_size, dtype=torch.bool, device=z.device)
+        sim_matrix_masked = sim_matrix.masked_fill(mask, -1e9)
+
+        # Compute cross-entropy loss
+        loss = torch.nn.functional.cross_entropy(sim_matrix_masked, labels)
+
+        return loss
+
+
+class MomentumEncoder(nn.Module):
+    """Momentum-updated encoder for stable contrastive learning."""
+
+    def __init__(self, encoder: nn.Module, momentum: float = 0.999):
+        super().__init__()
+        self.encoder = encoder
+        self.momentum_encoder = self._clone_encoder(encoder)
+        self.momentum = momentum
+
+        # Freeze momentum encoder
+        for param in self.momentum_encoder.parameters():
+            param.requires_grad = False
+
+    def _clone_encoder(self, encoder: nn.Module) -> nn.Module:
+        """Create a deep copy of the encoder."""
+        import copy
+        return copy.deepcopy(encoder)
+
+    @torch.no_grad()
+    def update_momentum(self):
+        """Update momentum encoder weights."""
+        for p_main, p_momentum in zip(self.encoder.parameters(), self.momentum_encoder.parameters()):
+            p_momentum.data = p_momentum.data * self.momentum + p_main.data * (1 - self.momentum)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass through both encoders.
+
+        Args:
+            x: (batch_size, num_points, 3) point cloud
+
+        Returns:
+            z_online: features from main encoder
+            z_momentum: features from momentum encoder (detached)
+        """
+        z_online = self.encoder(x)
+        with torch.no_grad():
+            z_momentum = self.momentum_encoder(x)
+        return z_online, z_momentum
+
+
+class ContrastiveTrainer:
+    """Trainer for instance discrimination with contrastive learning."""
+
+    def __init__(self, encoder: nn.Module, device: str = "cpu", lr: float = 1e-3, use_momentum: bool = True):
+        self.device = device
+        self.encoder = encoder.to(device)
+        self.use_momentum = use_momentum
+        if use_momentum:
+            self.momentum_encoder_wrapper = MomentumEncoder(encoder, momentum=0.999).to(device)
+        self.loss_fn = NTXentLoss(temperature=0.07)
+        self.optimizer = torch.optim.Adam(self.encoder.parameters(), lr=lr)
+
+    def train_step(self, cloud1: torch.Tensor, cloud2: torch.Tensor) -> float:
+        """
+        Single training step on a positive pair.
+
+        Args:
+            cloud1: (batch_size, num_points, 3) first augmentation
+            cloud2: (batch_size, num_points, 3) second augmentation
+
+        Returns:
+            loss: scalar loss value
+        """
+        cloud1 = cloud1.to(self.device)
+        cloud2 = cloud2.to(self.device)
+
+        # Normalize point clouds
+        cloud1 = normalize_points(cloud1)
+        cloud2 = normalize_points(cloud2)
+
+        # Forward pass through encoder
+        z1 = self.encoder(cloud1)
+        z2 = self.encoder(cloud2)
+
+        # Compute contrastive loss between the two augmentations
+        loss = self.loss_fn(z1, z2)
+
+        # Backward pass
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        # Update momentum encoder if used
+        if self.use_momentum:
+            self.momentum_encoder_wrapper.update_momentum()
+
+        return loss.item()
+
+    def evaluate_similarity(self, dataset: PointCloudDataset, num_samples: int = 16) -> Tuple[float, float]:
+        """
+        Evaluate the encoder by computing cosine similarity on positive and negative pairs.
+
+        Args:
+            dataset: PointCloudDataset instance
+            num_samples: number of pairs to evaluate
+
+        Returns:
+            pos_sim: mean cosine similarity for positive pairs
+            neg_sim: mean cosine similarity for negative pairs
+        """
+        self.encoder.eval()
+
+        pos_sims = []
+        neg_sims = []
+
+        with torch.no_grad():
+            for i in range(min(num_samples, len(dataset))):
+                # Positive pair
+                cloud1, cloud2 = dataset.get_positive_pair(i)
+                cloud1_t = torch.from_numpy(cloud1).unsqueeze(0).to(self.device)
+                cloud2_t = torch.from_numpy(cloud2).unsqueeze(0).to(self.device)
+
+                cloud1_t = normalize_points(cloud1_t)
+                cloud2_t = normalize_points(cloud2_t)
+
+                feat1 = self.encoder(cloud1_t)
+                feat2 = self.encoder(cloud2_t)
+
+                feat1_norm = torch.nn.functional.normalize(feat1, dim=1)
+                feat2_norm = torch.nn.functional.normalize(feat2, dim=1)
+
+                pos_sim = (feat1_norm * feat2_norm).sum(dim=1).item()
+                pos_sims.append(pos_sim)
+
+                # Negative pair
+                cloud1, cloud2 = dataset.get_negative_pair(i)
+                cloud1_t = torch.from_numpy(cloud1).unsqueeze(0).to(self.device)
+                cloud2_t = torch.from_numpy(cloud2).unsqueeze(0).to(self.device)
+
+                cloud1_t = normalize_points(cloud1_t)
+                cloud2_t = normalize_points(cloud2_t)
+
+                feat1 = self.encoder(cloud1_t)
+                feat2 = self.encoder(cloud2_t)
+
+                feat1_norm = torch.nn.functional.normalize(feat1, dim=1)
+                feat2_norm = torch.nn.functional.normalize(feat2, dim=1)
+
+                neg_sim = (feat1_norm * feat2_norm).sum(dim=1).item()
+                neg_sims.append(neg_sim)
+
+        self.encoder.train()
+
+        mean_pos_sim = np.mean(pos_sims)
+        mean_neg_sim = np.mean(neg_sims)
+
+        return mean_pos_sim, mean_neg_sim

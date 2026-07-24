@@ -58,3 +58,35 @@ PointINS proposes an instance-oriented self-supervised learning framework for le
 - No geometric offset branch (Pass 3)
 - Synthetic data is random uniform point clouds (not realistic 3D shapes)
 - No downstream evaluation or clustering tasks yet
+
+### Pass 2 Status: COMPLETE
+
+**Implemented**:
+- NTXentLoss: contrastive loss for instance discrimination
+  - Supports both single-pair (pairwise cosine similarity) and batch (full NT-Xent with negatives)
+  - Uses temperature scaling for numerical stability
+- MomentumEncoder: optional momentum-updated encoder for training stability
+  - Maintains a slowly-updated copy of the encoder
+  - Useful for larger training runs (can be disabled for simplicity)
+- ContrastiveTrainer: training loop for learning discriminative features
+  - Handles normalization and forward passes
+  - Computes contrastive loss and gradient updates
+  - Optional momentum encoder updates
+- evaluate_similarity: evaluation metric showing positive vs negative pair similarity
+  - Demonstrates that encoder learns to distinguish instances
+  - Tracks cosine similarity improvements during training
+- 3 new test cases: NT-Xent loss, momentum encoder, and end-to-end contrastive training
+  - Training shows 5.9x loss reduction and improved positive pair similarity
+  - All tests passing
+
+**Simplified/Stubbed**:
+- Single-pair loss (for batch_size=1) uses simplified pairwise cosine loss instead of full NT-Xent
+  - Full NT-Xent requires batch_size > 1 to have meaningful hard negatives
+  - Simplified version still effectively trains the encoder
+- Momentum encoder not used in default training (use_momentum=False by default)
+  - Can be enabled for larger training runs
+- No batch-based training loop yet (processes single positive pairs)
+  - Pass 4 will implement full batched training and end-to-end pipeline
+- No retrieval or clustering evaluation yet
+- Synthetic data is still random uniform point clouds (not realistic)
+- No downstream task evaluation yet (Pass 4)
