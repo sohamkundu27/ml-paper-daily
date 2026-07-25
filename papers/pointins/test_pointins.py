@@ -11,7 +11,10 @@ from pointins import (
     PointCloudEncoder,
     OrthogonalOffsetBranch,
     geometry_aware_loss,
-    GeometryAwareTrainer
+    GeometryAwareTrainer,
+    retrieve_nearest_instances,
+    evaluate_clustering,
+    run_end_to_end_demo
 )
 
 
@@ -315,6 +318,87 @@ def test_offset_patterns():
     print(f"  Offset magnitude range: [{offset_magnitudes.min():.4f}, {offset_magnitudes.max():.4f}]")
 
 
+def test_retrieve_nearest_instances():
+    """Test instance retrieval based on learned representations."""
+    feature_dim = 128
+    num_instances = 16
+
+    # Create random features
+    all_features = torch.randn(num_instances, feature_dim)
+    query_idx = 0
+    query_features = all_features[query_idx:query_idx+1]
+
+    indices, similarities = retrieve_nearest_instances(query_features, all_features, k=5)
+
+    assert len(indices) == 5
+    assert len(similarities) == 5
+    assert indices[0] == query_idx  # First should be the query itself
+    assert similarities[0] > similarities[1]  # Sorted by similarity
+    print("✓ Retrieve nearest instances test passed")
+
+
+def test_evaluate_clustering():
+    """Test clustering evaluation metric."""
+    feature_dim = 128
+    num_instances = 32
+
+    # Create features (random)
+    features = torch.randn(num_instances, feature_dim)
+    true_labels = np.arange(num_instances)
+
+    accuracy = evaluate_clustering(features, true_labels, num_clusters=8)
+
+    assert 0.0 <= accuracy <= 1.0
+    assert not np.isnan(accuracy)
+    print(f"✓ Evaluate clustering test passed (accuracy: {accuracy:.4f})")
+
+
+def test_get_representations():
+    """Test extracting representations from trainer."""
+    device = "cpu"
+    encoder = PointCloudEncoder(input_dim=3, hidden_dim=64, output_dim=128)
+    offset_branch = OrthogonalOffsetBranch(feature_dim=128, hidden_dim=64)
+    trainer = GeometryAwareTrainer(encoder, offset_branch, device=device, lr=1e-3)
+    dataset = PointCloudDataset(num_objects=12, num_points=128)
+
+    # Train briefly
+    for step in range(10):
+        idx = step % len(dataset)
+        cloud1, cloud2 = dataset.get_positive_pair(idx)
+        cloud1_t = torch.from_numpy(cloud1).unsqueeze(0)
+        cloud2_t = torch.from_numpy(cloud2).unsqueeze(0)
+        trainer.train_step(cloud1_t, cloud2_t)
+
+    # Extract representations
+    representations = trainer.get_representations(dataset)
+
+    assert representations.shape == (len(dataset), 128)
+    assert not torch.isnan(representations).any()
+    print("✓ Get representations test passed")
+
+
+def test_end_to_end_demo_mini():
+    """Test end-to-end demo on small synthetic data."""
+    results = run_end_to_end_demo(num_objects=8, num_points=256, num_epochs=5, device="cpu")
+
+    assert "initial_loss" in results
+    assert "final_loss" in results
+    assert "retrieval_accuracy" in results
+    assert "clustering_accuracy" in results
+
+    # Check that loss decreased
+    assert results["initial_loss"] > results["final_loss"]
+
+    # Check that metrics are in valid ranges
+    assert 0.0 <= results["retrieval_accuracy"] <= 1.0
+    assert 0.0 <= results["clustering_accuracy"] <= 1.0
+
+    print(f"✓ End-to-end demo test passed")
+    print(f"  Final loss: {results['final_loss']:.4f}")
+    print(f"  Retrieval accuracy: {results['retrieval_accuracy']*100:.1f}%")
+    print(f"  Clustering accuracy: {results['clustering_accuracy']*100:.1f}%")
+
+
 if __name__ == "__main__":
     print("Running PointINS Pass 1 tests...\n")
     test_augmentation()
@@ -335,5 +419,11 @@ if __name__ == "__main__":
     test_point_cloud_encoder()
     test_geometry_aware_training()
     test_offset_patterns()
+
+    print("\nRunning PointINS Pass 4 tests...\n")
+    test_retrieve_nearest_instances()
+    test_evaluate_clustering()
+    test_get_representations()
+    test_end_to_end_demo_mini()
 
     print("\n✓ All tests passed!")

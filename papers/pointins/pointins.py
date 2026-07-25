@@ -558,3 +558,225 @@ class GeometryAwareTrainer:
         offsets_batch = torch.cat(offsets_list, dim=0)
 
         return points_batch, offsets_batch
+
+    def get_representations(self, dataset: PointCloudDataset) -> torch.Tensor:
+        """
+        Extract learned representations for all instances in the dataset.
+
+        Args:
+            dataset: PointCloudDataset instance
+
+        Returns:
+            representations: (num_objects, output_dim) tensor of global features
+        """
+        self.encoder.eval()
+
+        features_list = []
+
+        with torch.no_grad():
+            for i in range(len(dataset)):
+                cloud, _ = dataset.get_positive_pair(i)
+                cloud_t = torch.from_numpy(cloud).unsqueeze(0).to(self.device)
+                cloud_t = normalize_points(cloud_t)
+
+                global_feat, _ = self.encoder(cloud_t)
+                features_list.append(global_feat.cpu())
+
+        self.encoder.train()
+
+        representations = torch.cat(features_list, dim=0)
+        return representations
+
+
+def retrieve_nearest_instances(query_features: torch.Tensor, all_features: torch.Tensor,
+                               k: int = 5) -> Tuple[List[int], List[float]]:
+    """
+    Retrieve k nearest instances based on feature similarity.
+
+    Args:
+        query_features: (1, feature_dim) query point cloud features
+        all_features: (num_instances, feature_dim) all instance features
+        k: number of nearest neighbors to retrieve
+
+    Returns:
+        indices: list of k nearest instance indices
+        similarities: list of k cosine similarities
+    """
+    query_norm = torch.nn.functional.normalize(query_features, dim=1)
+    all_norm = torch.nn.functional.normalize(all_features, dim=1)
+
+    similarities = torch.mm(query_norm, all_norm.T).squeeze(0)  # (num_instances,)
+
+    top_k_sims, top_k_indices = torch.topk(similarities, k=min(k, len(all_features)))
+
+    return top_k_indices.tolist(), top_k_sims.tolist()
+
+
+def simple_kmeans(features: torch.Tensor, num_clusters: int, num_iters: int = 10) -> np.ndarray:
+    """
+    Simple k-means clustering implementation.
+
+    Args:
+        features: (num_instances, feature_dim) data points
+        num_clusters: number of clusters
+        num_iters: number of iterations
+
+    Returns:
+        cluster_labels: (num_instances,) cluster assignment for each point
+    """
+    features_np = features.numpy() if isinstance(features, torch.Tensor) else features
+    num_points = features_np.shape[0]
+
+    # Initialize centroids randomly
+    indices = np.random.choice(num_points, num_clusters, replace=False)
+    centroids = features_np[indices].copy()
+
+    for _ in range(num_iters):
+        # Assign points to nearest centroid
+        distances = np.linalg.norm(features_np[:, None, :] - centroids[None, :, :], axis=2)
+        cluster_labels = np.argmin(distances, axis=1)
+
+        # Update centroids
+        new_centroids = np.zeros_like(centroids)
+        for k in range(num_clusters):
+            mask = cluster_labels == k
+            if mask.sum() > 0:
+                new_centroids[k] = features_np[mask].mean(axis=0)
+            else:
+                new_centroids[k] = centroids[k]
+
+        centroids = new_centroids
+
+    # Final assignment
+    distances = np.linalg.norm(features_np[:, None, :] - centroids[None, :, :], axis=2)
+    cluster_labels = np.argmin(distances, axis=1)
+
+    return cluster_labels
+
+
+def evaluate_clustering(features: torch.Tensor, true_labels: np.ndarray, num_clusters: int = None) -> float:
+    """
+    Evaluate clustering quality using simple label matching.
+    Assign each cluster to the majority label in that cluster, then compute accuracy.
+
+    Args:
+        features: (num_instances, feature_dim) learned representations
+        true_labels: (num_instances,) true instance labels (just 0, 1, 2, ... for dataset order)
+        num_clusters: number of clusters for k-means (default: sqrt(num_instances))
+
+    Returns:
+        clustering_accuracy: fraction of instances correctly assigned
+    """
+    if num_clusters is None:
+        num_clusters = max(2, int(np.sqrt(len(features))))
+
+    # k-means clustering
+    cluster_labels = simple_kmeans(features, num_clusters, num_iters=10)
+
+    # Simple label matching: for each cluster, assign it the label of its majority element
+    cluster_to_label = {}
+    for cluster_id in range(num_clusters):
+        mask = cluster_labels == cluster_id
+        if mask.sum() > 0:
+            majority_label = np.bincount(true_labels[mask]).argmax()
+            cluster_to_label[cluster_id] = majority_label
+
+    # Compute accuracy
+    predicted_labels = np.array([cluster_to_label.get(c, 0) for c in cluster_labels])
+    accuracy = np.mean(predicted_labels == true_labels)
+
+    return accuracy
+
+
+def run_end_to_end_demo(num_objects: int = 32, num_points: int = 512, num_epochs: int = 50,
+                       device: str = "cpu") -> dict:
+    """
+    Run complete end-to-end demo: data generation → training → evaluation.
+
+    Args:
+        num_objects: number of synthetic point cloud instances
+        num_points: points per cloud
+        num_epochs: training epochs
+        device: torch device
+
+    Returns:
+        results: dictionary with training and evaluation metrics
+    """
+    print("=" * 60)
+    print("PointINS Pass 4: End-to-End Demo")
+    print("=" * 60)
+
+    print(f"\n1. Data Generation")
+    print(f"   Generating {num_objects} synthetic point clouds with {num_points} points each...")
+    dataset = PointCloudDataset(num_objects=num_objects, num_points=num_points)
+    print(f"   ✓ Dataset created")
+
+    print(f"\n2. Model Initialization")
+    encoder = PointCloudEncoder(input_dim=3, hidden_dim=64, output_dim=128)
+    offset_branch = OrthogonalOffsetBranch(feature_dim=128, hidden_dim=64)
+    trainer = GeometryAwareTrainer(encoder, offset_branch, device=device, lr=1e-3, lambda_geo=0.1)
+    print(f"   ✓ Encoder and offset branch initialized")
+
+    print(f"\n3. Training ({num_epochs} epochs)")
+    all_losses = []
+    for epoch in range(num_epochs):
+        epoch_losses = []
+        for idx in range(len(dataset)):
+            cloud1, cloud2 = dataset.get_positive_pair(idx)
+            cloud1_t = torch.from_numpy(cloud1).unsqueeze(0)
+            cloud2_t = torch.from_numpy(cloud2).unsqueeze(0)
+
+            total_loss, cont_loss, geo_loss = trainer.train_step(cloud1_t, cloud2_t)
+            epoch_losses.append(total_loss)
+
+        avg_loss = np.mean(epoch_losses)
+        all_losses.append(avg_loss)
+
+        if (epoch + 1) % max(1, num_epochs // 5) == 0:
+            print(f"   Epoch {epoch + 1:3d}: loss = {avg_loss:.4f}")
+
+    print(f"   ✓ Training complete (final loss: {all_losses[-1]:.4f})")
+
+    print(f"\n4. Downstream Task 1: Instance Retrieval")
+    representations = trainer.get_representations(dataset)
+    print(f"   Extracted {len(representations)} representations")
+
+    # Test retrieval: for a few instances, retrieve k nearest neighbors
+    k = 5
+    retrieval_matches = 0
+    num_test_queries = min(10, len(dataset))
+
+    for query_idx in range(num_test_queries):
+        query_feat = representations[query_idx:query_idx+1]
+        retrieved_indices, retrieved_sims = retrieve_nearest_instances(query_feat, representations, k=k)
+
+        # First retrieved should be the query itself (high similarity)
+        if retrieved_indices[0] == query_idx:
+            retrieval_matches += 1
+
+    retrieval_accuracy = retrieval_matches / num_test_queries
+    print(f"   Self-retrieval accuracy: {retrieval_accuracy * 100:.1f}% ({retrieval_matches}/{num_test_queries})")
+
+    print(f"\n5. Downstream Task 2: Clustering Evaluation")
+    true_labels = np.arange(len(dataset))  # Each instance is its own class
+    clustering_acc = evaluate_clustering(representations, true_labels, num_clusters=None)
+    print(f"   Clustering accuracy: {clustering_acc * 100:.1f}%")
+
+    print(f"\n6. Results Summary")
+    print(f"   Loss reduction: {all_losses[0]:.4f} → {all_losses[-1]:.4f} ({all_losses[0]/all_losses[-1]:.2f}x)")
+    print(f"   Retrieval accuracy: {retrieval_accuracy * 100:.1f}%")
+    print(f"   Clustering accuracy: {clustering_acc * 100:.1f}%")
+
+    results = {
+        "num_objects": num_objects,
+        "num_points": num_points,
+        "num_epochs": num_epochs,
+        "initial_loss": float(all_losses[0]),
+        "final_loss": float(all_losses[-1]),
+        "loss_reduction": float(all_losses[0] / all_losses[-1]),
+        "retrieval_accuracy": float(retrieval_accuracy),
+        "clustering_accuracy": float(clustering_acc),
+        "all_losses": [float(x) for x in all_losses]
+    }
+
+    return results
