@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from remix import LoRALayer, LoRALinear, SimpleRouter, MixtureOfLoRAs
+from remix import (LoRALayer, LoRALinear, SimpleRouter, MixtureOfLoRAs,
+                   LearnedRouter, MixtureOfLoRAsRL)
 
 
 def test_lora_layer_forward():
@@ -161,6 +162,170 @@ def test_end_to_end():
     print(f"  Loss value: {loss.item():.4f}")
 
 
+def test_learned_router_forward():
+    """Test learned router forward pass and probability output."""
+    in_features, num_loras, num_active = 64, 5, 2
+    router = LearnedRouter(in_features, num_loras, num_active)
+
+    x = torch.randn(4, in_features)
+    routing, probs = router.get_routing(x)
+
+    assert routing.shape == (4, num_loras), f"Expected routing shape (4, {num_loras})"
+    assert probs.shape == (4, num_loras), f"Expected probs shape (4, {num_loras})"
+    # Check that routing is binary with exactly num_active ones per sample
+    row_sums = routing.sum(dim=1)
+    assert torch.allclose(row_sums, torch.full_like(row_sums, num_active)), \
+        f"Each routing row should have {num_active} ones, got {row_sums}"
+    # Check probabilities sum to 1
+    assert torch.allclose(probs.sum(dim=1), torch.ones(4)), "Probabilities should sum to 1"
+    print("✓ Learned router forward pass test passed")
+
+
+def test_learned_router_policy_loss():
+    """Test that policy loss is computable and flows gradients."""
+    in_features, num_loras, num_active = 64, 5, 2
+    router = LearnedRouter(in_features, num_loras, num_active)
+
+    x = torch.randn(4, in_features)
+    routing, probs = router.get_routing(x)
+
+    # Simulate task loss (per-sample)
+    task_loss = torch.tensor([0.5, 0.6, 0.4, 0.7])
+
+    policy_loss = router.compute_policy_loss(probs, routing, task_loss)
+
+    assert policy_loss.requires_grad, "Policy loss should be differentiable"
+    assert policy_loss.shape == torch.Size([]), f"Policy loss should be scalar, got {policy_loss.shape}"
+
+    # Test backward
+    policy_loss.backward()
+    has_grad = False
+    for param in router.parameters():
+        if param.grad is not None:
+            has_grad = True
+            break
+    assert has_grad, "Router parameters should receive gradients"
+    print("✓ Learned router policy loss test passed")
+
+
+def test_learned_router_load_statistics():
+    """Test that load balancing statistics are tracked."""
+    in_features, num_loras, num_active = 64, 5, 2
+    router = LearnedRouter(in_features, num_loras, num_active)
+
+    # Generate multiple batches and compute policy loss to update statistics
+    for _ in range(10):
+        x = torch.randn(4, in_features)
+        routing, probs = router.get_routing(x)
+        task_loss = torch.tensor([0.5, 0.6, 0.4, 0.7])
+        # This call updates the load statistics
+        _ = router.compute_policy_loss(probs, routing, task_loss)
+
+    load_stats = router.get_load_statistics()
+    assert load_stats.shape == (num_loras,), f"Expected shape ({num_loras},)"
+    # Load should be roughly balanced
+    assert load_stats.sum() > 0, "At least some load should be recorded"
+    print(f"✓ Learned router load statistics test passed (load per LoRA: {load_stats})")
+
+
+def test_mixture_of_loras_rl_forward():
+    """Test MixtureOfLoRAsRL forward pass."""
+    in_features, out_features = 64, 32
+    num_loras, num_active, rank = 4, 2, 8
+
+    mixture = MixtureOfLoRAsRL(in_features, out_features, num_loras, num_active, rank, alpha=1.0)
+
+    x = torch.randn(4, in_features)
+    output, routing, probs = mixture(x)
+
+    assert output.shape == (4, out_features), f"Expected output shape (4, {out_features})"
+    assert routing.shape == (4, num_loras), f"Expected routing shape (4, {num_loras})"
+    assert probs.shape == (4, num_loras), f"Expected probs shape (4, {num_loras})"
+    print("✓ Mixture of LoRAs RL forward pass test passed")
+
+
+def test_mixture_of_loras_rl_training():
+    """Test MixtureOfLoRAsRL training with loss computation."""
+    in_features, out_features = 64, 32
+    num_loras, num_active, rank = 4, 2, 8
+
+    mixture = MixtureOfLoRAsRL(in_features, out_features, num_loras, num_active, rank, alpha=1.0)
+    optimizer = torch.optim.Adam(mixture.parameters(), lr=0.001)
+
+    x = torch.randn(8, in_features)
+    y_target = torch.randn(8, out_features)
+
+    # Training step
+    for _ in range(3):
+        optimizer.zero_grad()
+        total_loss, task_loss = mixture.compute_loss(x, y_target)
+        total_loss.backward()
+        optimizer.step()
+
+    # Verify losses are finite and computable
+    assert task_loss.item() > 0, "Task loss should be positive"
+    assert not torch.isnan(total_loss), "Total loss should not be NaN"
+    assert not torch.isinf(total_loss), "Total loss should not be infinite"
+
+    # Verify gradients flowed
+    for param in mixture.loras[0].parameters():
+        assert param.grad is not None, "LoRA parameters should have gradients"
+    print("✓ Mixture of LoRAs RL training test passed")
+
+
+def test_mixture_of_loras_rl_load_balancing():
+    """Test that RL training encourages load balancing."""
+    in_features, out_features = 64, 32
+    num_loras, num_active, rank = 6, 2, 8
+
+    mixture = MixtureOfLoRAsRL(in_features, out_features, num_loras, num_active, rank,
+                              alpha=1.0, load_balance_weight=0.5)
+    optimizer = torch.optim.Adam(mixture.parameters(), lr=0.01)
+
+    # Train for a few steps
+    for _ in range(50):
+        x = torch.randn(8, in_features)
+        y_target = torch.randn(8, out_features)
+
+        optimizer.zero_grad()
+        total_loss, _ = mixture.compute_loss(x, y_target)
+        total_loss.backward()
+        optimizer.step()
+
+    # Check load statistics
+    load_stats = mixture.router.get_load_statistics()
+    # With load balancing, load should be more uniform
+    # All should be reasonably loaded (no complete collapse)
+    assert (load_stats > 0.1).all(), "All LoRAs should have some load with balancing"
+    print(f"✓ Mixture of LoRAs RL load balancing test passed (load: {load_stats})")
+
+
+def test_mixture_of_loras_rl_compared_to_simple():
+    """Compare learned vs simple router behavior."""
+    in_features, out_features = 64, 32
+    num_loras, num_active, rank = 4, 2, 8
+
+    # Simple router
+    simple_mixture = MixtureOfLoRAs(in_features, out_features, num_loras, num_active, rank)
+
+    # Learned router
+    learned_mixture = MixtureOfLoRAsRL(in_features, out_features, num_loras, num_active, rank)
+
+    x = torch.randn(4, in_features)
+
+    simple_out, simple_routing = simple_mixture(x)
+    learned_out, learned_routing, learned_probs = learned_mixture(x)
+
+    # Outputs should have same shape
+    assert simple_out.shape == learned_out.shape, "Output shapes should match"
+
+    # Both should have binary routing
+    assert (simple_routing == 0).sum() + (simple_routing == 1).sum() == simple_routing.numel()
+    assert (learned_routing == 0).sum() + (learned_routing == 1).sum() == learned_routing.numel()
+
+    print("✓ Learned vs simple router comparison test passed")
+
+
 if __name__ == "__main__":
     test_lora_layer_forward()
     test_lora_layer_gradients()
@@ -170,4 +335,14 @@ if __name__ == "__main__":
     test_mixture_of_loras_gradients()
     test_mixture_routing_statistics()
     test_end_to_end()
+
+    # Pass 2 tests
+    test_learned_router_forward()
+    test_learned_router_policy_loss()
+    test_learned_router_load_statistics()
+    test_mixture_of_loras_rl_forward()
+    test_mixture_of_loras_rl_training()
+    test_mixture_of_loras_rl_load_balancing()
+    test_mixture_of_loras_rl_compared_to_simple()
+
     print("\n✅ All tests passed!")

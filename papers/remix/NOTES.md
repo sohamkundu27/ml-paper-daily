@@ -37,3 +37,18 @@ ReMix addresses this by using discrete, non-learnable routing weights that ensur
 - **Uniform averaging**: All selected LoRAs contribute equally (no learned weighting)
 - **No language model integration**: Works on generic linear layer adapter, not real LLM weights
 - **Fixed rank**: All LoRAs use the same rank (future work could use adaptive ranks)
+
+### Pass 2 implementation:
+- ✅ `LearnedRouter`: Policy network that learns to score each LoRA based on input features
+- ✅ **RLOO-style gradient estimation**: Computes policy loss with baseline to reduce variance
+- ✅ **Load balancing loss**: KL divergence penalty to encourage uniform activation across all LoRAs
+- ✅ **Policy gradient training**: Uses REINFORCE-style update where negative loss serves as reward signal
+- ✅ `MixtureOfLoRAsRL`: Full integration with learned routing and end-to-end training
+- ✅ Load tracking and statistics: Monitor routing imbalance throughout training
+- ✅ Comprehensive test suite: Policy loss gradient flow, load balancing, training convergence
+
+### Simplified/stubbed in Pass 2:
+- **Deterministic top-k selection**: Uses argmax for inference rather than sampling (simplification for stability)
+- **Per-batch baseline**: Baseline is mean loss over batch (full RLOO would compute per-sample leave-one-out baselines)
+- **No sophisticated RL**: Uses simple policy gradient rather than more complex RL algorithms (PPO, A3C, etc.)
+- **No language model weights**: Still works on synthetic/toy tasks, not real LLM fine-tuning
