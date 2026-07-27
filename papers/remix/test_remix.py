@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 from remix import (LoRALayer, LoRALinear, SimpleRouter, MixtureOfLoRAs,
-                   LearnedRouter, MixtureOfLoRAsRL)
+                   LearnedRouter, MixtureOfLoRAsRL, RoutingMonitor,
+                   MixtureOfLoRAsMonitored)
 
 
 def test_lora_layer_forward():
@@ -326,6 +327,232 @@ def test_mixture_of_loras_rl_compared_to_simple():
     print("✓ Learned vs simple router comparison test passed")
 
 
+# Pass 3 tests: Monitoring and integration
+def test_routing_monitor_initialization():
+    """Test RoutingMonitor initialization and basic statistics."""
+    num_loras = 5
+    monitor = RoutingMonitor(num_loras)
+
+    # Check initial state
+    assert monitor.sample_count == 0
+    assert monitor.activation_counts.sum() == 0
+    print("✓ Routing monitor initialization test passed")
+
+
+def test_routing_monitor_update():
+    """Test RoutingMonitor update with routing decisions."""
+    num_loras = 5
+    num_active = 2
+    monitor = RoutingMonitor(num_loras)
+
+    # Create a batch of routing decisions
+    batch_size = 8
+    routing = torch.zeros(batch_size, num_loras)
+    for i in range(batch_size):
+        selected = torch.randperm(num_loras)[:num_active]
+        routing[i, selected] = 1.0
+
+    monitor.update(routing)
+
+    assert monitor.sample_count == batch_size
+    assert monitor.activation_counts.sum() == batch_size * num_active
+    print("✓ Routing monitor update test passed")
+
+
+def test_routing_monitor_statistics():
+    """Test that monitor computes correct statistics."""
+    num_loras = 6
+    monitor = RoutingMonitor(num_loras)
+
+    # Feed uniform routing (all LoRAs equally active)
+    batch_size = 60
+    routing = torch.zeros(batch_size, num_loras)
+    for i in range(batch_size):
+        # Ensure all LoRAs get equal activation
+        routing[i, i % num_loras] = 1.0
+        routing[i, (i + 1) % num_loras] = 1.0
+
+    monitor.update(routing)
+
+    # Check activation rates
+    rates = monitor.get_activation_rates()
+    # With this pattern, each LoRA should be activated ~33.3% of the time (2/6)
+    expected_rate = 2 / num_loras
+    assert torch.allclose(rates, torch.full_like(rates, expected_rate), atol=0.01), \
+        f"Expected rates ~{expected_rate}, got {rates}"
+
+    # Check imbalance ratio (should be close to 1 for uniform)
+    imbalance = monitor.get_imbalance_ratio()
+    assert imbalance < 1.1, f"Imbalance ratio should be ~1.0 for uniform, got {imbalance}"
+
+    # Check entropy (should be high for uniform)
+    entropy = monitor.get_entropy()
+    assert entropy > 0.9, f"Entropy should be high (~1.0) for uniform, got {entropy}"
+
+    print(f"✓ Routing monitor statistics test passed")
+    print(f"  Rates: {rates}")
+    print(f"  Imbalance: {imbalance:.2f}x, Entropy: {entropy:.3f}")
+
+
+def test_routing_monitor_imbalance_detection():
+    """Test that monitor detects load imbalance."""
+    num_loras = 4
+    monitor = RoutingMonitor(num_loras)
+
+    # Create imbalanced routing: only first 2 LoRAs are used
+    batch_size = 20
+    routing = torch.zeros(batch_size, num_loras)
+    for i in range(batch_size):
+        routing[i, 0] = 1.0
+        routing[i, 1] = 1.0
+
+    monitor.update(routing)
+
+    rates = monitor.get_activation_rates()
+    # First two should be 100%, last two should be 0%
+    assert torch.allclose(rates[:2], torch.ones(2)), "First two should be fully active"
+    assert torch.allclose(rates[2:], torch.zeros(2)), "Last two should be inactive"
+
+    # Imbalance should be very high
+    imbalance = monitor.get_imbalance_ratio()
+    assert imbalance == float('inf'), "Imbalance should be infinite for non-overlapping subsets"
+
+    # Entropy should be very low
+    entropy = monitor.get_entropy()
+    assert entropy < 0.1, f"Entropy should be low for imbalanced routing, got {entropy}"
+
+    print(f"✓ Routing monitor imbalance detection test passed")
+    print(f"  Detected imbalance: {imbalance}, Entropy: {entropy:.3f}")
+
+
+def test_routing_monitor_reset():
+    """Test that monitor can be reset."""
+    num_loras = 5
+    monitor = RoutingMonitor(num_loras)
+
+    # Add some data
+    routing = torch.ones(8, num_loras)
+    monitor.update(routing)
+    assert monitor.sample_count == 8
+
+    # Reset
+    monitor.reset()
+    assert monitor.sample_count == 0
+    assert monitor.activation_counts.sum() == 0
+
+    print("✓ Routing monitor reset test passed")
+
+
+def test_mixture_of_loras_monitored_forward():
+    """Test MixtureOfLoRAsMonitored forward pass."""
+    in_features, out_features = 64, 32
+    num_loras, num_active, rank = 4, 2, 8
+
+    mixture = MixtureOfLoRAsMonitored(in_features, out_features, num_loras,
+                                     num_active, rank, alpha=1.0)
+
+    x = torch.randn(4, in_features)
+    output, routing, probs = mixture(x)
+
+    assert output.shape == (4, out_features)
+    assert routing.shape == (4, num_loras)
+    assert probs.shape == (4, num_loras)
+
+    # Check that monitor was updated
+    assert mixture.monitor.sample_count == 4
+    print("✓ Mixture of LoRAs monitored forward pass test passed")
+
+
+def test_mixture_of_loras_monitored_statistics():
+    """Test that monitored mixture tracks routing statistics."""
+    in_features, out_features = 64, 32
+    num_loras, num_active, rank = 5, 2, 8
+
+    mixture = MixtureOfLoRAsMonitored(in_features, out_features, num_loras,
+                                     num_active, rank, alpha=1.0,
+                                     load_balance_weight=0.5)
+
+    # Train for multiple steps
+    optimizer = torch.optim.Adam(mixture.parameters(), lr=0.01)
+    for step in range(30):
+        x = torch.randn(8, in_features)
+        y_target = torch.randn(8, out_features)
+
+        optimizer.zero_grad()
+        total_loss, _ = mixture.compute_loss(x, y_target)
+        total_loss.backward()
+        optimizer.step()
+
+    # Get statistics
+    stats = mixture.get_routing_statistics()
+
+    # Check that we have the expected keys
+    assert 'activation_rates' in stats
+    assert 'imbalance_ratio' in stats
+    assert 'entropy' in stats
+    assert 'summary' in stats
+
+    # With load balancing, all LoRAs should have some activation
+    rates = stats['activation_rates']
+    assert (rates > 0.1).all(), f"All LoRAs should have reasonable load, got {rates}"
+
+    # Imbalance should not be too extreme
+    imbalance = stats['imbalance_ratio']
+    assert imbalance < 3.0, f"Load balancing should keep imbalance reasonable, got {imbalance}x"
+
+    print("✓ Mixture of LoRAs monitored statistics test passed")
+    print(f"  {stats['summary']}")
+
+
+def test_mixture_of_loras_monitored_vs_unmonitored():
+    """Test that monitored version produces same outputs as unmonitored."""
+    in_features, out_features = 64, 32
+    num_loras, num_active, rank = 4, 2, 8
+
+    # Create two models with same seed
+    torch.manual_seed(42)
+    monitored = MixtureOfLoRAsMonitored(in_features, out_features, num_loras,
+                                       num_active, rank, alpha=1.0)
+
+    torch.manual_seed(42)
+    unmonitored = MixtureOfLoRAsRL(in_features, out_features, num_loras,
+                                  num_active, rank, alpha=1.0)
+
+    x = torch.randn(4, in_features)
+
+    # Get outputs
+    monitored_out, _, _ = monitored(x)
+    unmonitored_out, _, _ = unmonitored(x)
+
+    # Outputs should be identical (same parameters, same routing)
+    assert torch.allclose(monitored_out, unmonitored_out, rtol=1e-5), \
+        "Monitored and unmonitored should produce same outputs"
+
+    print("✓ Monitored vs unmonitored consistency test passed")
+
+
+def test_routing_monitor_history():
+    """Test that monitor records history snapshots."""
+    num_loras = 4
+    monitor = RoutingMonitor(num_loras)
+
+    # Add data and record snapshots
+    for step in range(3):
+        routing = torch.randint(0, 2, (8, num_loras)).float()
+        monitor.update(routing)
+        monitor.log_snapshot(step)
+
+    # Check history
+    assert len(monitor.history) == 3
+    for i, snapshot in enumerate(monitor.history):
+        assert snapshot['step'] == i
+        assert 'rates' in snapshot
+        assert 'imbalance_ratio' in snapshot
+        assert 'entropy' in snapshot
+
+    print("✓ Routing monitor history test passed")
+
+
 if __name__ == "__main__":
     test_lora_layer_forward()
     test_lora_layer_gradients()
@@ -344,5 +571,16 @@ if __name__ == "__main__":
     test_mixture_of_loras_rl_training()
     test_mixture_of_loras_rl_load_balancing()
     test_mixture_of_loras_rl_compared_to_simple()
+
+    # Pass 3 tests: Monitoring and integration
+    test_routing_monitor_initialization()
+    test_routing_monitor_update()
+    test_routing_monitor_statistics()
+    test_routing_monitor_imbalance_detection()
+    test_routing_monitor_reset()
+    test_mixture_of_loras_monitored_forward()
+    test_mixture_of_loras_monitored_statistics()
+    test_mixture_of_loras_monitored_vs_unmonitored()
+    test_routing_monitor_history()
 
     print("\n✅ All tests passed!")

@@ -345,3 +345,137 @@ class MixtureOfLoRAsRL(nn.Module):
         policy_loss = self.router.compute_policy_loss(probs, routing, task_loss)
 
         return task_loss + policy_loss, task_loss
+
+
+class RoutingMonitor:
+    """
+    Monitors routing statistics across batches to verify load balancing.
+    Tracks per-LoRA activation counts and computes imbalance metrics.
+    """
+
+    def __init__(self, num_loras: int):
+        self.num_loras = num_loras
+        self.activation_counts = torch.zeros(num_loras)
+        self.sample_count = 0
+        self.history = []
+
+    def update(self, routing: torch.Tensor):
+        """
+        Update monitor with routing decisions from a batch.
+        Args:
+            routing: (batch_size, num_loras) binary routing matrix
+        """
+        with torch.no_grad():
+            self.activation_counts += routing.sum(dim=0).cpu()
+            self.sample_count += routing.shape[0]
+
+    def get_activation_rates(self) -> torch.Tensor:
+        """Return fraction of samples each LoRA was activated for."""
+        if self.sample_count == 0:
+            return torch.zeros(self.num_loras)
+        return self.activation_counts / self.sample_count
+
+    def get_imbalance_ratio(self) -> float:
+        """Return max load / min load ratio (1.0 = perfect balance)."""
+        rates = self.get_activation_rates()
+        max_rate = rates.max().item()
+        min_rate = rates.min().item()
+        if min_rate < 1e-8:
+            return float('inf') if max_rate > 1e-8 else 1.0
+        return max_rate / min_rate
+
+    def get_entropy(self) -> float:
+        """Return Shannon entropy of activation distribution (higher = more uniform)."""
+        rates = self.get_activation_rates()
+        rates = torch.clamp(rates, min=1e-8)
+        entropy = -(rates * torch.log(rates)).sum().item()
+        max_entropy = torch.log(torch.tensor(self.num_loras)).item()
+        return entropy / max_entropy if max_entropy > 0 else 0.0
+
+    def log_snapshot(self, step: int):
+        """Record current statistics."""
+        rates = self.get_activation_rates()
+        snapshot = {
+            'step': step,
+            'rates': rates.clone(),
+            'imbalance_ratio': self.get_imbalance_ratio(),
+            'entropy': self.get_entropy()
+        }
+        self.history.append(snapshot)
+
+    def reset(self):
+        """Clear accumulated statistics."""
+        self.activation_counts.zero_()
+        self.sample_count = 0
+
+    def summary(self) -> str:
+        """Return human-readable summary of current statistics."""
+        rates = self.get_activation_rates()
+        rates_str = ', '.join(f'{r:.3f}' for r in rates.tolist())
+        return (f"Activation rates: [{rates_str}] | "
+                f"Imbalance ratio: {self.get_imbalance_ratio():.2f}x | "
+                f"Entropy: {self.get_entropy():.3f}")
+
+
+class MixtureOfLoRAsMonitored(nn.Module):
+    """
+    Mixture of LoRAs with RL routing and comprehensive monitoring.
+    Extends MixtureOfLoRAsRL with built-in routing statistics tracking.
+    """
+
+    def __init__(self, in_features: int, out_features: int,
+                 num_loras: int, num_active: int, rank: int,
+                 alpha: float = 1.0, router_hidden_dim: int = 64,
+                 load_balance_weight: float = 0.1):
+        super().__init__()
+        self.mixture = MixtureOfLoRAsRL(
+            in_features, out_features, num_loras, num_active, rank,
+            alpha=alpha, router_hidden_dim=router_hidden_dim,
+            load_balance_weight=load_balance_weight
+        )
+        self.monitor = RoutingMonitor(num_loras)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Forward pass with automatic monitoring."""
+        output, routing, probs = self.mixture(x)
+        self.monitor.update(routing)
+        return output, routing, probs
+
+    def compute_loss(self, x: torch.Tensor, y_target: torch.Tensor,
+                    task_loss_fn=None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute loss and update statistics."""
+        output, routing, probs = self.mixture.forward(x)
+        self.monitor.update(routing)
+
+        if task_loss_fn is None:
+            task_loss_fn = nn.MSELoss()
+
+        task_loss = task_loss_fn(output, y_target)
+        policy_loss = self.mixture.router.compute_policy_loss(probs, routing, task_loss)
+
+        return task_loss + policy_loss, task_loss
+
+    def get_routing_statistics(self) -> dict:
+        """Return detailed routing statistics."""
+        return {
+            'activation_rates': self.monitor.get_activation_rates(),
+            'imbalance_ratio': self.monitor.get_imbalance_ratio(),
+            'entropy': self.monitor.get_entropy(),
+            'summary': self.monitor.summary()
+        }
+
+    def reset_statistics(self):
+        """Reset monitoring counters."""
+        self.monitor.reset()
+
+    def get_router(self) -> LearnedRouter:
+        """Access the underlying learned router."""
+        return self.mixture.router
+
+    def get_loras(self) -> nn.ModuleList:
+        """Access the LoRA layers."""
+        return self.mixture.loras
+
+    def parameters(self):
+        """Delegate parameter access to mixture."""
+        return self.mixture.parameters()

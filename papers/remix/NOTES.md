@@ -52,3 +52,29 @@ ReMix addresses this by using discrete, non-learnable routing weights that ensur
 - **Per-batch baseline**: Baseline is mean loss over batch (full RLOO would compute per-sample leave-one-out baselines)
 - **No sophisticated RL**: Uses simple policy gradient rather than more complex RL algorithms (PPO, A3C, etc.)
 - **No language model weights**: Still works on synthetic/toy tasks, not real LLM fine-tuning
+
+### Pass 3 implementation:
+- ✅ `RoutingMonitor`: Tracks activation statistics across batches for each LoRA
+  - Per-LoRA activation rates: fraction of samples each LoRA is selected for
+  - Imbalance ratio: max load / min load (1.0 = perfect balance, ∞ = collapse)
+  - Shannon entropy: measures uniformity of activation distribution (higher = more uniform)
+  - Snapshot history: records statistics at specific training steps
+- ✅ `MixtureOfLoRAsMonitored`: Full mixture with integrated monitoring
+  - Automatically tracks routing decisions during forward/backward passes
+  - Provides `get_routing_statistics()` for querying current load distribution
+  - Can reset monitoring counters to measure statistics over specific windows
+  - Delegates model parameters to underlying mixture for optimizer compatibility
+- ✅ Comprehensive monitoring tests (9 new tests):
+  - Basic initialization and updates
+  - Statistic computation (rates, imbalance, entropy)
+  - Imbalance detection (verifies monitoring catches collapse patterns)
+  - Monitor reset functionality
+  - Integration with monitored mixture
+  - Training with real load-balancing verification
+  - Consistency with unmonitored version (same outputs)
+  - History snapshots for tracking training progression
+
+### Simplified/stubbed in Pass 3:
+- **Limited to top-k routing**: Still using deterministic top-k rather than sampling-based routing
+- **No visualization**: Monitoring data is numeric; visualization tools not yet implemented
+- **No real LLM adaptation**: Monitoring works on synthetic tasks, not real language model fine-tuning
