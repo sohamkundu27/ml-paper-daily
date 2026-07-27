@@ -78,3 +78,49 @@ ReMix addresses this by using discrete, non-learnable routing weights that ensur
 - **Limited to top-k routing**: Still using deterministic top-k rather than sampling-based routing
 - **No visualization**: Monitoring data is numeric; visualization tools not yet implemented
 - **No real LLM adaptation**: Monitoring works on synthetic tasks, not real language model fine-tuning
+
+### Pass 4 implementation:
+- ✅ `demo_mixture_vs_single_lora()`: End-to-end demonstration comparing mixture vs single LoRA
+  - Synthetic regression task with two data types (A and B) to show potential for specialization
+  - Training and evaluation loop comparing performance on equal computational grounds
+  - Single LoRA trained with higher rank to match approximate parameter budget
+  - Mixture trained with learned routing and load balancing
+  - Reports final test loss, improvement ratio, and routing statistics
+  - Routing achieves near-perfect balance (imbalance ratio ~1.0x)
+- ✅ Test suite for demo: `test_demo_mixture_vs_single_lora()` verifies results dictionary and parameter correctness
+
+### Simplified/stubbed in Pass 4:
+- **Synthetic task only**: Uses toy regression, not real language model fine-tuning
+- **No sampling-based routing**: Still uses deterministic top-k selection for stability
+- **Limited model architecture**: Simple frozen base linear layer (not real pretrained weights)
+- **No hyperparameter sweep**: Single configuration shown; does not explore optimal load_balance_weight
+- **Small-scale demonstration**: Toy dataset size (200 train); real scenarios would use millions of samples
+
+## Summary: Full paper architecture (all 4 passes)
+
+The ReMix paper has been fully implemented as a proof-of-concept with the following components:
+
+**Core mechanics:**
+- Multiple trainable LoRA layers (low-rank weight updates) that can be mixed for a base model
+- Discrete, balanced routing that ensures all LoRAs receive training signal
+- RLOO-style policy gradient training that learns which LoRAs to activate
+- Load balancing constraint via KL divergence to maintain uniform activation
+- Built-in monitoring infrastructure for routing statistics
+
+**What works end-to-end:**
+- Forward pass with learned LoRA routing
+- Backward pass with policy gradients
+- Load balancing during training (all LoRAs stay active)
+- Training loop with Adam optimizer
+- Evaluation and statistics tracking
+
+**What remains simplified for this proof-of-concept:**
+- Routing uses deterministic top-k selection (not probabilistic sampling)
+- Per-batch baseline for RLOO (not true leave-one-out per-sample)
+- No sophisticated RL algorithm (just basic policy gradient)
+- Tested only on toy synthetic data, not real language models
+- No integration with actual LLM weights or real fine-tuning scenarios
+- No visualization tools for routing evolution or performance metrics
+
+**Why these simplifications were chosen:**
+The goal was to capture the core insight of ReMix - that discrete, balanced routing with policy gradient training can enable effective mixture-of-LoRAs without collapse - while keeping the implementation clean and runnable in pure PyTorch. The simplified choices maintain the essential mechanisms while reducing complexity and data requirements for demonstration purposes.

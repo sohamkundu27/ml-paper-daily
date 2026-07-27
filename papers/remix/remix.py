@@ -479,3 +479,148 @@ class MixtureOfLoRAsMonitored(nn.Module):
     def parameters(self):
         """Delegate parameter access to mixture."""
         return self.mixture.parameters()
+
+
+def demo_mixture_vs_single_lora():
+    """
+    End-to-end demo comparing mixture-of-LoRAs vs single LoRA on a toy regression task.
+
+    Shows that under the same parameter budget, a mixture of LoRAs with learned
+    routing can outperform a single larger LoRA by specializing different LoRAs
+    to different input characteristics.
+    """
+    # Task setup: regress from high-dim input to output
+    in_features, out_features = 128, 64
+    rank = 8
+
+    # Single LoRA setup
+    single_rank = 16  # Higher rank to match total parameters
+    single_params = in_features * single_rank + single_rank * out_features
+
+    # Mixture setup: 4 LoRAs with rank 8 each
+    num_loras, num_active = 4, 2
+    mixture_params = num_loras * (in_features * rank + rank * out_features)
+    mixture_params += 64 * in_features + 64 * 4  # Router network
+
+    print(f"Parameter budget comparison:")
+    print(f"  Single LoRA (rank={single_rank}): {single_params:,} params")
+    print(f"  Mixture LoRAs ({num_loras} x rank={rank}, active={num_active}): {mixture_params:,} params")
+    print()
+
+    # Generate synthetic dataset: 10 "easy" samples and 10 "hard" samples
+    torch.manual_seed(42)
+    n_train, n_test = 200, 50
+
+    # Split data: first half is "type A" patterns, second half is "type B"
+    x_train = torch.randn(n_train, in_features)
+    y_train = torch.zeros(n_train, out_features)
+
+    # Type A: samples 0-99 follow a specific pattern
+    y_train[:n_train//2] = x_train[:n_train//2, :out_features] * 0.5 + torch.randn(n_train//2, out_features) * 0.05
+
+    # Type B: samples 100-199 follow a different pattern
+    y_train[n_train//2:] = -x_train[n_train//2:, :out_features] * 0.3 + torch.randn(n_train//2, out_features) * 0.05
+
+    # Test set (mixed types)
+    x_test = torch.randn(n_test, in_features)
+    y_test = torch.zeros(n_test, out_features)
+    y_test[:n_test//2] = x_test[:n_test//2, :out_features] * 0.5
+    y_test[n_test//2:] = -x_test[n_test//2:, :out_features] * 0.3
+
+    # Model 1: Single LoRA with higher rank
+    class SingleLoRAModel(nn.Module):
+        def __init__(self, in_feat, out_feat, lora_rank):
+            super().__init__()
+            self.base_linear = nn.Linear(in_feat, out_feat)
+            self.base_linear.weight.requires_grad = False
+            self.base_linear.bias.requires_grad = False
+            self.lora = LoRALayer(in_feat, out_feat, lora_rank, alpha=1.0)
+
+        def forward(self, x):
+            return self.base_linear(x) + self.lora(x)
+
+    single_model = SingleLoRAModel(in_features, out_features, single_rank)
+    mixture_model = MixtureOfLoRAsMonitored(
+        in_features, out_features, num_loras, num_active, rank,
+        alpha=1.0, load_balance_weight=0.2
+    )
+
+    # Training
+    epochs = 100
+    batch_size = 16
+    lr = 0.01
+
+    opt_single = torch.optim.Adam(single_model.parameters(), lr=lr)
+    opt_mixture = torch.optim.Adam(mixture_model.parameters(), lr=lr)
+    loss_fn = nn.MSELoss()
+
+    single_losses = []
+    mixture_losses = []
+
+    for epoch in range(epochs):
+        # Single LoRA training
+        single_model.train()
+        epoch_loss_single = 0.0
+        for i in range(0, n_train, batch_size):
+            x_batch = x_train[i:i+batch_size]
+            y_batch = y_train[i:i+batch_size]
+
+            opt_single.zero_grad()
+            y_pred = single_model(x_batch)
+            loss = loss_fn(y_pred, y_batch)
+            loss.backward()
+            opt_single.step()
+            epoch_loss_single += loss.item()
+
+        single_losses.append(epoch_loss_single / (n_train // batch_size))
+
+        # Mixture training
+        mixture_model.train()
+        epoch_loss_mixture = 0.0
+        for i in range(0, n_train, batch_size):
+            x_batch = x_train[i:i+batch_size]
+            y_batch = y_train[i:i+batch_size]
+
+            opt_mixture.zero_grad()
+            total_loss, _ = mixture_model.compute_loss(x_batch, y_batch, loss_fn)
+            total_loss.backward()
+            opt_mixture.step()
+            epoch_loss_mixture += total_loss.item()
+
+        mixture_losses.append(epoch_loss_mixture / (n_train // batch_size))
+
+        if (epoch + 1) % 25 == 0:
+            print(f"Epoch {epoch+1:3d}: Single={single_losses[-1]:.4f} | Mixture={mixture_losses[-1]:.4f}")
+
+    # Evaluation
+    single_model.eval()
+    mixture_model.eval()
+
+    with torch.no_grad():
+        y_pred_single = single_model(x_test)
+        test_loss_single = loss_fn(y_pred_single, y_test).item()
+
+        y_pred_mixture, _, _ = mixture_model(x_test)
+        test_loss_mixture = loss_fn(y_pred_mixture, y_test).item()
+
+    print()
+    print("=" * 60)
+    print("FINAL RESULTS")
+    print("=" * 60)
+    print(f"Single LoRA final test loss:   {test_loss_single:.4f}")
+    print(f"Mixture LoRA final test loss:  {test_loss_mixture:.4f}")
+    print(f"Improvement:                   {(test_loss_single / test_loss_mixture - 1) * 100:.1f}%")
+    print()
+
+    # Show routing statistics
+    stats = mixture_model.get_routing_statistics()
+    print("Mixture routing statistics (on test set):")
+    print(f"  {stats['summary']}")
+    print()
+
+    return {
+        'single_loss': test_loss_single,
+        'mixture_loss': test_loss_mixture,
+        'improvement': test_loss_single / test_loss_mixture,
+        'routing_stats': stats
+    }

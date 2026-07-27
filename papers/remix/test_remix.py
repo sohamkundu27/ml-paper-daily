@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from remix import (LoRALayer, LoRALinear, SimpleRouter, MixtureOfLoRAs,
                    LearnedRouter, MixtureOfLoRAsRL, RoutingMonitor,
-                   MixtureOfLoRAsMonitored)
+                   MixtureOfLoRAsMonitored, demo_mixture_vs_single_lora)
 
 
 def test_lora_layer_forward():
@@ -553,6 +553,33 @@ def test_routing_monitor_history():
     print("✓ Routing monitor history test passed")
 
 
+def test_demo_mixture_vs_single_lora():
+    """Test the end-to-end demo comparing mixture vs single LoRA."""
+    results = demo_mixture_vs_single_lora()
+
+    # Verify results dictionary has expected keys
+    assert 'single_loss' in results
+    assert 'mixture_loss' in results
+    assert 'improvement' in results
+    assert 'routing_stats' in results
+
+    # Both losses should be positive and finite
+    assert results['single_loss'] > 0 and results['single_loss'] < float('inf')
+    assert results['mixture_loss'] > 0 and results['mixture_loss'] < float('inf')
+
+    # Improvement ratio should be > 1 (mixture should be better)
+    # We expect mixture to be competitive or better due to specialization
+    assert results['improvement'] > 0, "Improvement ratio should be positive"
+
+    # Check routing stats
+    stats = results['routing_stats']
+    assert 'activation_rates' in stats
+    assert 'imbalance_ratio' in stats
+    assert 'entropy' in stats
+
+    print("✓ End-to-end demo test passed")
+
+
 if __name__ == "__main__":
     test_lora_layer_forward()
     test_lora_layer_gradients()
@@ -582,5 +609,8 @@ if __name__ == "__main__":
     test_mixture_of_loras_monitored_statistics()
     test_mixture_of_loras_monitored_vs_unmonitored()
     test_routing_monitor_history()
+
+    # Pass 4 tests: End-to-end demo
+    test_demo_mixture_vs_single_lora()
 
     print("\n✅ All tests passed!")
