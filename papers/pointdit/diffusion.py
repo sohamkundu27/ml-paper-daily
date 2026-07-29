@@ -42,13 +42,48 @@ class SimpleViTBlock(nn.Module):
         return x
 
 
+class CrossAttentionBlock(nn.Module):
+    """Transformer block with cross-attention to image features."""
+    def __init__(self, dim, num_heads, mlp_dim, dropout=0.1):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.self_attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
+
+        self.norm2 = nn.LayerNorm(dim)
+        self.cross_attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
+
+        self.norm3 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, mlp_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_dim, dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x, condition=None):
+        """
+        x: [B, N, D] - point patches
+        condition: [B, M, D] - image features (optional)
+        Returns: [B, N, D]
+        """
+        x = x + self.self_attn(self.norm1(x), self.norm1(x), self.norm1(x))[0]
+
+        if condition is not None:
+            x = x + self.cross_attn(self.norm2(x), condition, condition)[0]
+
+        x = x + self.mlp(self.norm3(x))
+        return x
+
+
 class DiffusionTransformer(nn.Module):
-    """Minimalist Vision Transformer for diffusion on point maps."""
-    def __init__(self, point_dim=3, patch_size=16, num_layers=4, hidden_dim=64, num_heads=4):
+    """Minimalist Vision Transformer for diffusion on point maps with optional conditioning."""
+    def __init__(self, point_dim=3, patch_size=16, num_layers=4, hidden_dim=64, num_heads=4, use_cross_attention=False):
         super().__init__()
         self.point_dim = point_dim
         self.patch_size = patch_size
         self.hidden_dim = hidden_dim
+        self.use_cross_attention = use_cross_attention
 
         # Embed point patches to hidden_dim
         self.patch_embed = nn.Linear(patch_size * point_dim, hidden_dim)
@@ -65,20 +100,35 @@ class DiffusionTransformer(nn.Module):
             nn.Linear(hidden_dim * 2, hidden_dim),
         )
 
-        # Transformer layers
-        self.transformer = nn.ModuleList([
-            SimpleViTBlock(hidden_dim, num_heads, hidden_dim * 4, dropout=0.1)
-            for _ in range(num_layers)
-        ])
+        # Transformer layers: alternate between self-attention and cross-attention
+        if use_cross_attention:
+            self.transformer = nn.ModuleList([
+                CrossAttentionBlock(hidden_dim, num_heads, hidden_dim * 4, dropout=0.1)
+                for _ in range(num_layers)
+            ])
+        else:
+            self.transformer = nn.ModuleList([
+                SimpleViTBlock(hidden_dim, num_heads, hidden_dim * 4, dropout=0.1)
+                for _ in range(num_layers)
+            ])
+
+        # Optional projection for image features to match hidden_dim
+        self.condition_proj = None
 
         # Output head: predict noise in point space
         self.norm_out = nn.LayerNorm(hidden_dim)
         self.out_head = nn.Linear(hidden_dim, patch_size * point_dim)
 
-    def forward(self, x, timesteps):
+    def set_condition_proj(self, cond_dim):
+        """Set up projection for conditions after construction (allows flexible input dimensions)."""
+        if self.condition_proj is None:
+            self.condition_proj = nn.Linear(cond_dim, self.hidden_dim)
+
+    def forward(self, x, timesteps, condition=None):
         """
         x: [B, N, patch_size*point_dim] - flattened point patches
         timesteps: [B] - diffusion timestep indices
+        condition: [B, M, cond_dim] or [B, cond_dim] - optional image features
         Returns: [B, N, patch_size*point_dim] - predicted noise
         """
         B, N, _ = x.shape
@@ -97,9 +147,23 @@ class DiffusionTransformer(nn.Module):
         t_proj = t_proj.unsqueeze(1)  # [B, 1, hidden_dim]
         x = x + t_proj
 
+        # Project condition to hidden_dim if provided
+        projected_condition = None
+        if condition is not None:
+            if condition.ndim == 2:
+                condition = condition.unsqueeze(1)  # [B, cond_dim] -> [B, 1, cond_dim]
+
+            if self.condition_proj is None:
+                self.set_condition_proj(condition.shape[-1])
+
+            projected_condition = self.condition_proj(condition)  # [B, M, hidden_dim]
+
         # Apply transformer blocks
         for block in self.transformer:
-            x = block(x)
+            if self.use_cross_attention and projected_condition is not None:
+                x = block(x, projected_condition)
+            else:
+                x = block(x)
 
         # Output head
         x = self.norm_out(x)

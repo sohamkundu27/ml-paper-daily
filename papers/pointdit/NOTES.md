@@ -20,12 +20,23 @@ PointDiT proposes a minimalist diffusion-transformer approach to single-image 3D
 
 ## Implemented vs. simplified
 
-**Pass 1 (this commit)**:
+**Pass 1**:
 - ✅ Basic ViT-based diffusion backbone (simplified: plain 4-layer ViT, no advanced architectural details)
 - ✅ Gaussian noise schedule (linear schedule, no complex variance schedules)
 - ✅ Diffusion forward/reverse process skeleton
 - ✅ Minimal test: denoising shapes with asserts on output dimensions
-- ❌ No real training (that's pass 3)
-- ❌ No image conditioning (that's pass 2)
+- ❌ No real training
+- ❌ No image conditioning
 - ❌ No pre-trained encoders
 - ❌ No real 3D data or metrics
+
+**Pass 2 (this commit)**:
+- ✅ Cross-attention mechanism for image feature conditioning (added CrossAttentionBlock)
+- ✅ Flexible condition injection into DiffusionTransformer (accepts variable-dimension embeddings)
+- ✅ Support for both patched and global image embeddings
+- ✅ Backward compatibility: model works without conditioning (use_cross_attention=False)
+- ✅ Tests demonstrate conditioning with synthetic image features (different condition dimensions)
+- ✅ Verified that conditioning affects model output (different conditions → different predictions)
+- ❌ No real image encoder integration yet (that's pass 3 onwards)
+- ❌ No actual training or loss computation
+- ❌ No real 3D data or evaluation metrics
