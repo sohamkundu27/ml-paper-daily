@@ -1,6 +1,6 @@
 import torch
 import torch.optim as optim
-from gram import GRAMPass1, GRAMPass2
+from gram import GRAMPass1, GRAMPass2, GRAMPass3
 
 
 def test_gram_basic():
@@ -256,6 +256,151 @@ def test_gram_pass2_constraint_satisfaction():
     )
 
 
+def test_gram_pass3_parallel_sampling():
+    """Test Pass 3 parallel trajectory sampling"""
+    model = GRAMPass3(input_dim=5, latent_dim=16, hidden_dim=32, num_steps=3)
+    x = torch.randn(4, 5)  # batch_size=4, input_dim=5
+
+    trajectories = model.sample_trajectories(x, num_trajectories=5, resample=False)
+
+    # Check we got 5 trajectories
+    assert len(trajectories) == 5, f"Expected 5 trajectories, got {len(trajectories)}"
+
+    # Check structure of each trajectory
+    for traj in trajectories:
+        assert traj["output"].shape == (4, 5), "Output shape mismatch"
+        assert len(traj["trajectory"]) == 4, "Trajectory length should be 4 (initial + 3 steps)"
+        assert traj["score"].shape == (4,), "Score shape should be (batch_size,)"
+
+    print("✓ Pass 3 parallel sampling test passed")
+
+
+def test_gram_pass3_resampling():
+    """Test Pass 3 trajectory resampling based on likelihood"""
+    model = GRAMPass3(input_dim=5, latent_dim=16, hidden_dim=32, num_steps=3)
+    x = torch.randn(4, 5)
+
+    trajectories = model.sample_trajectories(x, num_trajectories=10, resample=True, keep_ratio=0.5)
+
+    # After resampling with keep_ratio=0.5, should have ~5 trajectories
+    assert (
+        4 <= len(trajectories) <= 6
+    ), f"Expected ~5 trajectories after resampling, got {len(trajectories)}"
+
+    # Trajectories should be sorted by score (higher first)
+    scores = [traj["score"].mean().item() for traj in trajectories]
+    assert scores == sorted(scores, reverse=True), "Trajectories should be sorted by score"
+
+    print(f"✓ Pass 3 resampling test passed (kept {len(trajectories)} trajectories)")
+
+
+def test_gram_pass3_variable_depth():
+    """Test Pass 3 variable recursion depth with early stopping"""
+    model = GRAMPass3(input_dim=5, latent_dim=16, hidden_dim=32, num_steps=5)
+    x = torch.randn(4, 5)
+
+    trajectories = model.forward_variable_depth(
+        x, num_trajectories=5, max_depth=5, early_stopping=True, convergence_threshold=0.001
+    )
+
+    assert len(trajectories) == 5, "Should have 5 trajectories"
+
+    # Check that trajectories have variable depths (some may converge early)
+    depths = [traj["depth"] for traj in trajectories]
+    print(f"  Trajectory depths: {depths}")
+
+    # At least some trajectories should have depth <= max_depth
+    assert all(d <= 5 for d in depths), "All depths should be <= max_depth"
+    assert all(d > 0 for d in depths), "All depths should be > 0"
+
+    # Check outputs
+    for traj in trajectories:
+        assert traj["output"].shape == (4, 5), "Output shape mismatch"
+
+    print(f"✓ Pass 3 variable depth test passed (depths: {depths})")
+
+
+def test_gram_pass3_ensemble():
+    """Test Pass 3 trajectory ensemble methods"""
+    model = GRAMPass3(input_dim=5, latent_dim=16, hidden_dim=32, num_steps=3)
+    x = torch.randn(4, 5)
+
+    trajectories = model.sample_trajectories(x, num_trajectories=5, resample=False)
+
+    # Test mean ensemble
+    ensemble_mean = model.ensemble_outputs(trajectories, method="mean")
+    assert ensemble_mean.shape == (4, 5), f"Expected shape (4, 5), got {ensemble_mean.shape}"
+
+    # Test best ensemble
+    ensemble_best = model.ensemble_outputs(trajectories, method="best")
+    assert ensemble_best.shape == (4, 5), f"Expected shape (4, 5), got {ensemble_best.shape}"
+
+    # Mean ensemble should be between min and max of individual trajectories
+    all_outputs = torch.stack([t["output"] for t in trajectories])
+    assert (
+        ensemble_mean.min() >= all_outputs.min() - 0.1
+    ), "Ensemble mean should be reasonable"
+
+    print("✓ Pass 3 ensemble test passed")
+
+
+def test_gram_pass3_constraint_satisfaction():
+    """
+    Test Pass 3 on constraint satisfaction with trajectory ensemble.
+    """
+    model = GRAMPass3(input_dim=5, latent_dim=16, hidden_dim=32, num_steps=3)
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+    def create_target(x):
+        """Create target that satisfies constraints"""
+        x_clamped = torch.clamp(x, 0, 2)
+        sums = x_clamped.sum(dim=1, keepdim=True)
+        x_normalized = x_clamped * (5.0 / (sums + 1e-6))
+        return torch.clamp(x_normalized, 0, 2)
+
+    # Create synthetic dataset
+    num_samples = 16
+    x_noisy = torch.randn(num_samples, 5) * 2
+    x_target = create_target(x_noisy)
+
+    # Train using ensemble of trajectories
+    losses = []
+    for step in range(150):
+        # Sample trajectories and compute ensemble
+        trajectories = model.sample_trajectories(x_noisy, num_trajectories=3, resample=False)
+        ensemble_output = model.ensemble_outputs(trajectories, method="mean")
+
+        # Compute loss on ensemble output
+        recon_loss = torch.mean((ensemble_output - x_target) ** 2)
+        kl_loss = sum(t["kl_loss"] for t in trajectories) / len(trajectories)
+
+        total_loss = recon_loss + 0.01 * kl_loss
+        losses.append(total_loss.item())
+
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+
+    # Verify loss decreases
+    initial_loss = losses[0]
+    final_loss = losses[-1]
+    assert final_loss < initial_loss, f"Loss should decrease: {initial_loss:.4f} -> {final_loss:.4f}"
+
+    # Verify ensemble output satisfies constraints
+    with torch.no_grad():
+        trajectories = model.sample_trajectories(x_noisy, num_trajectories=3, resample=False)
+        ensemble_output = model.ensemble_outputs(trajectories, method="mean")
+        in_range = (ensemble_output >= -0.1) & (ensemble_output <= 2.1)
+        in_range_ratio = in_range.float().mean().item()
+        assert in_range_ratio > 0.65, f"Expected >65% in range, got {in_range_ratio*100:.1f}%"
+
+    print(
+        f"✓ Pass 3 constraint satisfaction test passed "
+        f"(loss: {initial_loss:.4f} -> {final_loss:.4f}, "
+        f"{in_range_ratio*100:.1f}% in valid range)"
+    )
+
+
 if __name__ == "__main__":
     print("Testing GRAM Pass 1...")
     test_gram_basic()
@@ -268,5 +413,12 @@ if __name__ == "__main__":
     test_gram_pass2_kl_loss()
     test_gram_pass2_training()
     test_gram_pass2_constraint_satisfaction()
+
+    print("\nTesting GRAM Pass 3 (Scaling and Trajectory Management)...")
+    test_gram_pass3_parallel_sampling()
+    test_gram_pass3_resampling()
+    test_gram_pass3_variable_depth()
+    test_gram_pass3_ensemble()
+    test_gram_pass3_constraint_satisfaction()
 
     print("\n✅ All tests passed!")

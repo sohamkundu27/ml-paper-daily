@@ -68,3 +68,18 @@ This paper proposes a framework for treating recursive reasoning itself as a pro
 - Variational inference is basic VAE-style with fixed prior N(0,1)
 - No learned prior or hierarchical latent structure
 - Single-sample training (one trajectory per forward pass, though can sample multiple at inference)
+
+**Pass 3 complete:**
+- ✅ Parallel trajectory sampling: sample_trajectories() generates K trajectories in parallel
+- ✅ Trajectory resampling: _resample_trajectories() keeps top-scoring trajectories by likelihood
+- ✅ Variable recursion depth: forward_variable_depth() supports early stopping based on convergence
+- ✅ Trajectory pruning: trajectories below convergence threshold can terminate early
+- ✅ Trajectory ensemble: ensemble_outputs() combines trajectories via mean or best-selection
+- ✅ Tests: parallel sampling, resampling, variable depth, ensemble methods, constraint satisfaction
+
+**Simplified in Pass 3:**
+- Resampling is basic (ranks by average score across batch, not per-sample)
+- Early stopping uses simple L2 norm convergence check (not variance-based or adaptive)
+- No per-sample trajectory pruning (all trajectories processed for all samples)
+- Ensemble combines outputs but not trajectory information weights
+- No importance-weighted SMC resampling (simplified to hard selection)
