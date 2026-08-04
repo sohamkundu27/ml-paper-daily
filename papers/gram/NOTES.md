@@ -53,3 +53,18 @@ This paper proposes a framework for treating recursive reasoning itself as a pro
 - Single trajectory only (no stochastic sampling)
 - Toy problem is very simple (just constraint satisfaction on 5D vectors)
 - No dual-loop architecture from paper (simplified to single loop)
+
+**Pass 2 complete:**
+- ✅ Stochastic transitions: Learned Gaussian perturbations on latent states
+- ✅ Amortized variational inference: Transition network outputs (mean, log_var)
+- ✅ KL divergence regularization: KL(q(z_t+1|z_t) || N(0,1)) for each step
+- ✅ Multiple trajectory sampling: Can sample diverse trajectories at inference
+- ✅ Flexible loss: Reconstruction + weighted KL term (configurable weight)
+- ✅ Tests: Forward pass, stochasticity verification, KL loss computation, training convergence, constraint satisfaction with stochastic reasoning
+
+**Simplified in Pass 2:**
+- No trajectory resampling/selection yet (added in Pass 3)
+- No parallel trajectory merging or pruning (added in Pass 3)
+- Variational inference is basic VAE-style with fixed prior N(0,1)
+- No learned prior or hierarchical latent structure
+- Single-sample training (one trajectory per forward pass, though can sample multiple at inference)
