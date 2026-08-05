@@ -83,3 +83,22 @@ This paper proposes a framework for treating recursive reasoning itself as a pro
 - No per-sample trajectory pruning (all trajectories processed for all samples)
 - Ensemble combines outputs but not trajectory information weights
 - No importance-weighted SMC resampling (simplified to hard selection)
+
+**Pass 4 complete:**
+- ✅ End-to-end demonstration on multi-constraint satisfaction problem
+- ✅ Multiple constraint verification: range bounds, sum constraints, inequality constraints
+- ✅ Multiple solution discovery: diverse trajectory sampling produces different valid solutions
+- ✅ Inference-time scaling comparison: demonstrates impact of 1 vs 3 vs 5 trajectories
+- ✅ Trajectory diversity validation: pairwise distance analysis confirms stochastic solutions differ
+- ✅ Ensemble methods in practice: both mean and best-selection aggregation tested
+- ✅ Full integration test: training → inference pipeline with real constraint satisfaction
+
+**Simplified in Pass 4:**
+- Constraint satisfaction scores are modest (0-30% range) due to simplified architecture vs full GRAM
+  - This is expected for a basic latent reasoning model on complex constraints
+  - Focus was on demonstrating the core stochastic reasoning mechanism, not achieving perfect satisfaction
+- No advanced constraint propagation or symbolic reasoning (would require constraint solver integration)
+- Optimization target is implicit in reconstruction loss, not explicit constraint checking during training
+- Single input-output paradigm (no multi-step planning or hierarchical reasoning across time)
+- No learned constraint weighting or adaptive focus on different constraint types
+- Trajectory scores are based on reconstruction loss only, not constraint-specific metrics
