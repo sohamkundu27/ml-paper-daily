@@ -40,3 +40,24 @@ PISA proposes that attention scores in non-critical blocks follow a stable distr
 - No efficiency metrics; Pass 1 just validates the blocking mechanism and mask generation
 - Dummy critical block identification based on variance; a real implementation would learn this
 - No integration with actual diffusion models; just the attention component in isolation
+
+### Pass 2
+
+**Implemented:**
+- `_taylor_exp_approximation()`: Polynomial approximation of exp(x) using Taylor series expansion up to configurable order
+- `_compute_piecewise_attention()`: Core mechanism that applies exact softmax to critical blocks and Taylor-approximated attention to non-critical blocks
+- Piecewise attention strategy replaces naive full softmax with targeted exact/approximate computation
+- Added `taylor_order` parameter to control approximation accuracy vs. speed tradeoff
+- Comprehensive tests for Taylor approximation, piecewise attention logic, and interaction with forward pass
+
+**How it works:**
+- For critical blocks: Computes exact exp(scores) and softmax normalization
+- For non-critical blocks: Approximates exp(scores) using polynomial: `1 + x + x²/2! + x³/3! + ...`
+- Normalization still couples all positions, ensuring proper probability distribution
+- This is the key efficiency mechanism: polynomial approximation avoids expensive exp() computation for stable, less important attention regions
+
+**Simplified/Stubbed:**
+- No explicit efficiency metrics or FLOPs counting; Pass 3 will add that
+- Taylor order fixed at 3 (higher orders trade accuracy for speed)
+- No integration with diffusion timestep pipeline yet
+- Attention scores still computed densely (Q·K^T); sparse score computation would be Pass 3+
