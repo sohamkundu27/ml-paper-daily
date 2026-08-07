@@ -376,3 +376,94 @@ def benchmark_attention(batch_size, seq_len, dim, num_heads=8, block_size=32, sp
         'flops_reduction': 1.0 - (sparse_flops / dense_flops),
         'speedup': (sum(dense_times[1:]) / len(dense_times[1:])) / (sum(sparse_times[1:]) / len(sparse_times[1:]))
     }
+
+
+class SyntheticDenoisingDataset:
+    """
+    Toy dataset for Pass 4: synthetic images with Gaussian noise.
+    Task: denoise a noisy image back to a clean version.
+    """
+
+    def __init__(self, num_samples=32, img_size=8, feature_dim=64):
+        self.num_samples = num_samples
+        self.img_size = img_size
+        self.feature_dim = feature_dim
+        self.seq_len = img_size * img_size
+
+    def generate_clean_image(self):
+        return torch.randn(self.seq_len, self.feature_dim)
+
+    def add_noise(self, clean, noise_level=0.3):
+        noise = torch.randn_like(clean) * noise_level
+        return clean + noise
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        clean = self.generate_clean_image()
+        noisy = self.add_noise(clean)
+        t = torch.randint(0, 1000, (1,), dtype=torch.float32)[0]
+        return noisy, clean, t
+
+
+def run_denoising_demo(use_sparse=True, num_epochs=3, batch_size=4):
+    """
+    End-to-end denoising demo: Pass 4 ties together all previous passes.
+    Shows sparse attention in a complete diffusion task.
+
+    Returns dict with loss history and final performance metrics.
+    """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    dataset = SyntheticDenoisingDataset(num_samples=32, img_size=8, feature_dim=64)
+
+    model = DiffusionTransformer(
+        dim=64,
+        num_heads=4,
+        num_layers=2,
+        block_size=16 if use_sparse else 64,
+        sparsity_ratio=0.5 if use_sparse else 0.0
+    ).to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    criterion = nn.MSELoss()
+
+    losses = []
+    for epoch in range(num_epochs):
+        epoch_loss = 0.0
+        num_batches = 0
+        for batch_idx in range(0, len(dataset), batch_size):
+            batch_noisy = []
+            batch_clean = []
+            batch_t = []
+            for idx in range(batch_idx, min(batch_idx + batch_size, len(dataset))):
+                noisy, clean, t = dataset[idx]
+                batch_noisy.append(noisy)
+                batch_clean.append(clean)
+                batch_t.append(t)
+
+            x = torch.stack(batch_noisy).to(device)
+            target = torch.stack(batch_clean).to(device)
+            t = torch.stack(batch_t).to(device)
+
+            optimizer.zero_grad()
+            output = model(x, t)
+            loss = criterion(output, target)
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+            num_batches += 1
+
+        avg_loss = epoch_loss / max(num_batches, 1)
+        losses.append(avg_loss)
+
+    final_loss = losses[-1] if losses else 0.0
+
+    return {
+        'losses': losses,
+        'final_loss': final_loss,
+        'num_epochs': num_epochs,
+        'use_sparse': use_sparse
+    }

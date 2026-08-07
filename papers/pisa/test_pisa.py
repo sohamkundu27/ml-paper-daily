@@ -1,5 +1,5 @@
 import torch
-from pisa import BlockwiseSparseAttention, DiffusionTransformer, TimestepEmbedding, benchmark_attention, count_attention_flops
+from pisa import BlockwiseSparseAttention, DiffusionTransformer, TimestepEmbedding, benchmark_attention, count_attention_flops, SyntheticDenoisingDataset, run_denoising_demo
 
 
 def test_blockwise_sparse_attention_output_shape():
@@ -315,6 +315,41 @@ def test_benchmark_attention():
     assert results['speedup'] > 0
 
 
+def test_synthetic_denoising_dataset():
+    """Test Pass 4: synthetic denoising dataset generation."""
+    dataset = SyntheticDenoisingDataset(num_samples=16, img_size=8, feature_dim=64)
+
+    assert len(dataset) == 16
+    assert dataset.seq_len == 64
+
+    noisy, clean, t = dataset[0]
+    assert noisy.shape == (64, 64)
+    assert clean.shape == (64, 64)
+    assert t.shape == torch.Size([])
+
+
+def test_denoising_demo_sparse():
+    """Test Pass 4: end-to-end sparse denoising demo."""
+    results = run_denoising_demo(use_sparse=True, num_epochs=1, batch_size=4)
+
+    assert 'losses' in results
+    assert 'final_loss' in results
+    assert results['use_sparse'] is True
+    assert len(results['losses']) == 1
+    assert results['final_loss'] > 0
+
+
+def test_denoising_demo_dense():
+    """Test Pass 4: end-to-end dense denoising demo for comparison."""
+    results = run_denoising_demo(use_sparse=False, num_epochs=1, batch_size=4)
+
+    assert 'losses' in results
+    assert 'final_loss' in results
+    assert results['use_sparse'] is False
+    assert len(results['losses']) == 1
+    assert results['final_loss'] > 0
+
+
 if __name__ == "__main__":
     test_blockwise_sparse_attention_output_shape()
     print("✓ test_blockwise_sparse_attention_output_shape")
@@ -363,5 +398,14 @@ if __name__ == "__main__":
 
     test_benchmark_attention()
     print("✓ test_benchmark_attention")
+
+    test_synthetic_denoising_dataset()
+    print("✓ test_synthetic_denoising_dataset")
+
+    test_denoising_demo_sparse()
+    print("✓ test_denoising_demo_sparse")
+
+    test_denoising_demo_dense()
+    print("✓ test_denoising_demo_dense")
 
     print("\nAll tests passed!")
