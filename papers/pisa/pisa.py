@@ -2,6 +2,44 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import time
+
+
+class TimestepEmbedding(nn.Module):
+    """Sinusoidal positional embedding for diffusion timesteps."""
+
+    def __init__(self, dim, max_time_steps=1000):
+        super().__init__()
+        self.dim = dim
+        self.max_time_steps = max_time_steps
+
+    def forward(self, t):
+        """
+        t: [batch] or scalar timestep
+        Returns: [batch, dim] embedding
+        """
+        if isinstance(t, int):
+            t = torch.tensor([t], dtype=torch.float32)
+        if t.dim() == 0:
+            t = t.unsqueeze(0)
+
+        batch_size = t.shape[0]
+        device = t.device
+
+        freqs = torch.arange(0, self.dim, 2, dtype=torch.float32, device=device)
+        freqs = freqs / self.dim
+        freqs = 1.0 / (10000 ** freqs)
+
+        t_expanded = t.unsqueeze(1) * freqs.unsqueeze(0)
+
+        emb = torch.zeros(batch_size, self.dim, device=device)
+        emb[:, 0::2] = torch.sin(t_expanded)
+        if self.dim % 2 == 1:
+            emb[:, 1::2] = torch.cos(t_expanded[:, :-1])
+        else:
+            emb[:, 1::2] = torch.cos(t_expanded)
+
+        return emb
 
 
 class BlockwiseSparseAttention(nn.Module):
@@ -190,3 +228,151 @@ class BlockwiseSparseAttention(nn.Module):
         allowed_positions += seq_len * self.block_size
         total_positions = seq_len * seq_len
         return 1.0 - (allowed_positions / total_positions)
+
+
+class DiffusionTransformer(nn.Module):
+    """
+    Minimal diffusion transformer with sparse attention.
+    Pass 3: Integrates diffusion timestep pipeline with efficiency tracking.
+    """
+
+    def __init__(self, dim, num_heads=8, num_layers=2, block_size=32, sparsity_ratio=0.5):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        self.timestep_embedding = TimestepEmbedding(dim)
+        self.input_proj = nn.Linear(dim, dim)
+        self.output_proj = nn.Linear(dim, dim)
+
+        self.sparse_attention_layers = nn.ModuleList([
+            BlockwiseSparseAttention(
+                dim=dim,
+                num_heads=num_heads,
+                block_size=block_size,
+                sparsity_ratio=sparsity_ratio,
+                taylor_order=3
+            )
+            for _ in range(num_layers)
+        ])
+
+        self.norm_layers = nn.ModuleList([nn.LayerNorm(dim) for _ in range(num_layers)])
+
+        self.mlp_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(dim, dim * 4),
+                nn.GELU(),
+                nn.Linear(dim * 4, dim)
+            )
+            for _ in range(num_layers)
+        ])
+
+    def forward(self, x, t):
+        """
+        x: [batch, seq_len, dim] - input features
+        t: [batch] - diffusion timesteps
+        Returns: [batch, seq_len, dim] - denoised output
+        """
+        batch_size, seq_len, dim = x.shape
+
+        x = self.input_proj(x)
+
+        t_emb = self.timestep_embedding(t)
+        t_emb = t_emb.unsqueeze(1).expand(-1, seq_len, -1)
+
+        x = x + t_emb
+
+        for attn, norm, mlp in zip(self.sparse_attention_layers, self.norm_layers, self.mlp_layers):
+            x_res = x
+            x = norm(x)
+            x = attn(x)
+            x = x + x_res
+
+            x_res = x
+            x = norm(x)
+            x = mlp(x)
+            x = x + x_res
+
+        x = self.output_proj(x)
+        return x
+
+
+def count_attention_flops(batch_size, seq_len, dim, num_heads, use_sparse=True, sparsity_ratio=0.5, block_size=32):
+    """
+    Estimate computational cost for exp/softmax in attention (this is where piecewise sparse helps).
+
+    For piecewise sparse attention:
+    - Critical blocks: exact exp() per position
+    - Non-critical blocks: Taylor polynomial approximation (3rd order = ~3 ops per position vs ~5 for exp)
+
+    Q·K^T is computed densely in both cases (would be sparse in full implementation).
+    Returns relative cost: lower is better.
+    """
+    num_blocks = (seq_len + block_size - 1) // block_size
+
+    if use_sparse:
+        num_critical = max(1, int(num_blocks * (1 - sparsity_ratio)))
+        critical_rows = num_critical * block_size
+
+        exp_cost_critical = 5.0
+        exp_cost_approx = 3.0
+
+        cost_critical = batch_size * num_heads * critical_rows * seq_len * exp_cost_critical
+        cost_noncritical = batch_size * num_heads * (seq_len - critical_rows) * seq_len * exp_cost_approx
+
+        return cost_critical + cost_noncritical
+    else:
+        exp_cost = 5.0
+        return batch_size * num_heads * seq_len * seq_len * exp_cost
+
+
+def benchmark_attention(batch_size, seq_len, dim, num_heads=8, block_size=32, sparsity_ratio=0.5, num_runs=5):
+    """
+    Benchmark sparse vs dense attention on latency.
+    Returns dict with timing and efficiency metrics.
+    """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    sparse_attn = BlockwiseSparseAttention(
+        dim=dim,
+        num_heads=num_heads,
+        block_size=block_size,
+        sparsity_ratio=sparsity_ratio
+    ).to(device)
+
+    dense_attn = BlockwiseSparseAttention(
+        dim=dim,
+        num_heads=num_heads,
+        block_size=seq_len,
+        sparsity_ratio=0.0
+    ).to(device)
+
+    x = torch.randn(batch_size, seq_len, dim, device=device)
+
+    sparse_times = []
+    for _ in range(num_runs):
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        start = time.time()
+        _ = sparse_attn(x)
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        sparse_times.append(time.time() - start)
+
+    dense_times = []
+    for _ in range(num_runs):
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        start = time.time()
+        _ = dense_attn(x)
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        dense_times.append(time.time() - start)
+
+    sparse_flops = count_attention_flops(batch_size, seq_len, dim, num_heads, use_sparse=True, sparsity_ratio=sparsity_ratio, block_size=block_size)
+    dense_flops = count_attention_flops(batch_size, seq_len, dim, num_heads, use_sparse=False)
+
+    return {
+        'sparse_latency_ms': sum(sparse_times[1:]) / len(sparse_times[1:]) * 1000,
+        'dense_latency_ms': sum(dense_times[1:]) / len(dense_times[1:]) * 1000,
+        'sparse_flops': sparse_flops,
+        'dense_flops': dense_flops,
+        'flops_reduction': 1.0 - (sparse_flops / dense_flops),
+        'speedup': (sum(dense_times[1:]) / len(dense_times[1:])) / (sum(sparse_times[1:]) / len(sparse_times[1:]))
+    }

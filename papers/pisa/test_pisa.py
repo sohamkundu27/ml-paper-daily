@@ -1,5 +1,5 @@
 import torch
-from pisa import BlockwiseSparseAttention
+from pisa import BlockwiseSparseAttention, DiffusionTransformer, TimestepEmbedding, benchmark_attention, count_attention_flops
 
 
 def test_blockwise_sparse_attention_output_shape():
@@ -211,6 +211,110 @@ def test_taylor_order_effect():
     assert not torch.isnan(out3).any()
 
 
+def test_timestep_embedding():
+    """Test timestep embedding for diffusion pipeline."""
+    dim = 128
+    batch_size = 4
+
+    emb = TimestepEmbedding(dim=dim)
+    t = torch.tensor([0, 100, 500, 999], dtype=torch.float32)
+
+    result = emb(t)
+
+    assert result.shape == (batch_size, dim)
+    assert not torch.isnan(result).any()
+    assert not torch.isinf(result).any()
+
+
+def test_diffusion_transformer_forward():
+    """Test diffusion transformer with sparse attention."""
+    batch_size = 2
+    seq_len = 32
+    dim = 64
+    num_heads = 4
+    num_layers = 2
+
+    model = DiffusionTransformer(
+        dim=dim,
+        num_heads=num_heads,
+        num_layers=num_layers,
+        block_size=8,
+        sparsity_ratio=0.5
+    )
+
+    x = torch.randn(batch_size, seq_len, dim)
+    t = torch.randint(0, 1000, (batch_size,), dtype=torch.float32)
+
+    out = model(x, t)
+
+    assert out.shape == x.shape
+    assert not torch.isnan(out).any()
+    assert not torch.isinf(out).any()
+
+
+def test_diffusion_transformer_gradient_flow():
+    """Test that gradients flow through diffusion transformer."""
+    batch_size = 2
+    seq_len = 32
+    dim = 64
+    num_heads = 4
+
+    model = DiffusionTransformer(dim=dim, num_heads=num_heads, num_layers=2, block_size=8)
+
+    x = torch.randn(batch_size, seq_len, dim, requires_grad=True)
+    t = torch.randint(0, 1000, (batch_size,), dtype=torch.float32)
+
+    out = model(x, t)
+    loss = out.sum()
+    loss.backward()
+
+    assert x.grad is not None
+    assert x.grad.shape == x.shape
+
+
+def test_flops_counting():
+    """Test FLOPs counting for sparse vs dense attention."""
+    batch_size = 2
+    seq_len = 64
+    dim = 128
+    num_heads = 8
+    block_size = 16
+    sparsity_ratio = 0.8
+
+    sparse_flops = count_attention_flops(batch_size, seq_len, dim, num_heads, use_sparse=True, sparsity_ratio=sparsity_ratio, block_size=block_size)
+    dense_flops = count_attention_flops(batch_size, seq_len, dim, num_heads, use_sparse=False)
+
+    assert sparse_flops > 0
+    assert dense_flops > 0
+    assert sparse_flops < dense_flops, f"Sparse ({sparse_flops}) should have fewer FLOPs than dense ({dense_flops})"
+
+
+def test_benchmark_attention():
+    """Test attention benchmarking (quick run with small sequence)."""
+    batch_size = 1
+    seq_len = 16
+    dim = 64
+    num_heads = 4
+
+    results = benchmark_attention(
+        batch_size=batch_size,
+        seq_len=seq_len,
+        dim=dim,
+        num_heads=num_heads,
+        block_size=8,
+        sparsity_ratio=0.5,
+        num_runs=2
+    )
+
+    assert 'sparse_latency_ms' in results
+    assert 'dense_latency_ms' in results
+    assert 'sparse_flops' in results
+    assert 'dense_flops' in results
+    assert results['sparse_latency_ms'] > 0
+    assert results['dense_latency_ms'] > 0
+    assert results['speedup'] > 0
+
+
 if __name__ == "__main__":
     test_blockwise_sparse_attention_output_shape()
     print("✓ test_blockwise_sparse_attention_output_shape")
@@ -244,5 +348,20 @@ if __name__ == "__main__":
 
     test_taylor_order_effect()
     print("✓ test_taylor_order_effect")
+
+    test_timestep_embedding()
+    print("✓ test_timestep_embedding")
+
+    test_diffusion_transformer_forward()
+    print("✓ test_diffusion_transformer_forward")
+
+    test_diffusion_transformer_gradient_flow()
+    print("✓ test_diffusion_transformer_gradient_flow")
+
+    test_flops_counting()
+    print("✓ test_flops_counting")
+
+    test_benchmark_attention()
+    print("✓ test_benchmark_attention")
 
     print("\nAll tests passed!")

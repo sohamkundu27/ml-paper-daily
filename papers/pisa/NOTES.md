@@ -61,3 +61,32 @@ PISA proposes that attention scores in non-critical blocks follow a stable distr
 - Taylor order fixed at 3 (higher orders trade accuracy for speed)
 - No integration with diffusion timestep pipeline yet
 - Attention scores still computed densely (Q·K^T); sparse score computation would be Pass 3+
+
+### Pass 3
+
+**Implemented:**
+- `TimestepEmbedding`: Sinusoidal positional encoding for diffusion timesteps
+- `DiffusionTransformer`: Minimal transformer with sparse attention, timestep conditioning, and residual connections
+  - Multi-layer architecture with layer normalization and MLP blocks
+  - Timestep embedding added to input features
+  - Each layer: attention + residual, then MLP + residual
+- `count_attention_flops()`: Estimates computational cost of exp/softmax, showing how Taylor approximation reduces cost
+  - Critical blocks: standard exp computation (5 ops per position)
+  - Non-critical blocks: 3rd-order Taylor polynomial (3 ops per position)
+  - Demonstrates savings proportional to (1 - sparsity_ratio)
+- `benchmark_attention()`: Latency benchmarking comparing sparse vs dense attention
+  - Runs multiple iterations to reduce variance
+  - Returns timing, FLOPs estimates, and speedup metrics
+- Comprehensive tests for timestep embedding, diffusion transformer forward/backward, and efficiency metrics
+
+**How Pass 3 enables efficiency testing:**
+- The piecewise strategy trades Taylor approximation cost (~3 ops) against exact exp cost (~5 ops)
+- With high sparsity (e.g., 80% non-critical blocks), approximation blocks save ~40% of exp computation
+- Actual latency speedup depends on implementation details and hardware (memory bandwidth, cache, etc.)
+
+**Simplified/Stubbed:**
+- No actual image/video generation or loss function; just forward pass + efficiency measurement
+- Diffusion timestep integration is minimal (just embedding conditioning); no noise scheduling or loss
+- Benchmark runs on small synthetic data; would need real diffusion task to measure quality impact
+- No distributed training or multi-GPU optimization
+- Taylor order remains fixed at 3 (tuning would be Pass 4)
