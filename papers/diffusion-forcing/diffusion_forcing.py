@@ -1,6 +1,74 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
+
+
+class SyntheticDataGenerator:
+    """Generate simple synthetic sequence data for training."""
+
+    @staticmethod
+    def random_sequences(num_samples, seq_len, token_dim, seed=None):
+        """Generate random token sequences.
+
+        Args:
+            num_samples: number of sequences
+            seq_len: length of each sequence
+            token_dim: dimension of each token
+            seed: random seed
+
+        Returns:
+            [num_samples, seq_len, token_dim] tensor
+        """
+        if seed is not None:
+            torch.manual_seed(seed)
+        return torch.randn(num_samples, seq_len, token_dim)
+
+    @staticmethod
+    def repeating_pattern_sequences(num_samples, seq_len, token_dim, pattern_len=4):
+        """Generate sequences with repeating patterns.
+
+        Args:
+            num_samples: number of sequences
+            seq_len: length of each sequence
+            token_dim: dimension of each token
+            pattern_len: length of repeating pattern
+
+        Returns:
+            [num_samples, seq_len, token_dim] tensor
+        """
+        sequences = []
+        for _ in range(num_samples):
+            # Create a random pattern
+            pattern = torch.randn(pattern_len, token_dim)
+            # Repeat it to fill seq_len
+            seq = pattern.repeat(seq_len // pattern_len + 1, 1)[:seq_len]
+            sequences.append(seq)
+        return torch.stack(sequences)
+
+    @staticmethod
+    def sine_wave_sequences(num_samples, seq_len, token_dim, freq=1.0):
+        """Generate sequences based on sine waves.
+
+        Args:
+            num_samples: number of sequences
+            seq_len: length of each sequence
+            token_dim: dimension of each token
+            freq: frequency of sine wave
+
+        Returns:
+            [num_samples, seq_len, token_dim] tensor
+        """
+        sequences = []
+        for i in range(num_samples):
+            # Each token dimension gets a sine wave with different phase
+            t = np.linspace(0, 2 * np.pi * freq, seq_len)
+            seq = torch.zeros(seq_len, token_dim)
+            for d in range(token_dim):
+                phase = 2 * np.pi * d / token_dim
+                seq[:, d] = torch.from_numpy(np.sin(t + phase)).float()
+            sequences.append(seq)
+        return torch.stack(sequences)
 
 
 def cosine_schedule(t, s=0.008):
@@ -137,3 +205,75 @@ class DiffusionForcing:
             x_pred: [batch, seq_len, token_dim] predicted clean tokens
         """
         return self.denoiser(x_t, t)
+
+    def compute_loss(self, x_0, t):
+        """Compute L2 loss between predicted and actual clean tokens.
+
+        Args:
+            x_0: [batch, seq_len, token_dim] clean tokens
+            t: [batch] timestep in [0, 1]
+
+        Returns:
+            loss: scalar L2 loss
+        """
+        # Add noise at timestep t
+        x_t, _, _ = self.forward_diffusion(x_0, t)
+
+        # Predict clean tokens
+        x_pred = self.denoise(x_t, t)
+
+        # L2 loss
+        loss = torch.nn.functional.mse_loss(x_pred, x_0)
+        return loss
+
+    def train_step(self, x_0, t, optimizer):
+        """Single training step.
+
+        Args:
+            x_0: [batch, seq_len, token_dim] clean tokens
+            t: [batch] timestep in [0, 1]
+            optimizer: torch optimizer
+
+        Returns:
+            loss: scalar loss value
+        """
+        optimizer.zero_grad()
+        loss = self.compute_loss(x_0, t)
+        loss.backward()
+        optimizer.step()
+        return loss.item()
+
+    def train(self, data_loader, num_epochs, learning_rate=1e-3):
+        """Train the denoiser on a dataset.
+
+        Args:
+            data_loader: iterable of batches of [batch, seq_len, token_dim] tensors
+            num_epochs: number of training epochs
+            learning_rate: optimizer learning rate
+
+        Returns:
+            losses: list of average losses per epoch
+        """
+        optimizer = optim.Adam(self.denoiser.parameters(), lr=learning_rate)
+        losses = []
+
+        for epoch in range(num_epochs):
+            epoch_loss = 0.0
+            num_batches = 0
+
+            for x_0 in data_loader:
+                # Move to device
+                x_0 = x_0.to(self.device)
+
+                # Random timestep for each sample in batch
+                t = torch.rand(x_0.shape[0]).to(self.device)
+
+                # Training step
+                loss = self.train_step(x_0, t, optimizer)
+                epoch_loss += loss
+                num_batches += 1
+
+            avg_loss = epoch_loss / num_batches
+            losses.append(avg_loss)
+
+        return losses
