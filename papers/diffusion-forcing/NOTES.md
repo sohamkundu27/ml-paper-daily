@@ -52,3 +52,12 @@ This paper introduces Diffusion Forcing, a training paradigm that combines next-
 - ✅ Comprehensive tests showing loss decreases and training converges
 - ⏸️ No sampling/inference yet (stubbed for pass 3)
 - ⏸️ Simplified: training on single batches; no validation set or checkpointing
+
+**Pass 3 Implementation:**
+- ✅ Iterative sampling: start with fully noisy sequence, progressively denoise to generate new tokens
+- ✅ Masked sampling: keep past tokens fixed while denoising future tokens (core Diffusion Forcing capability)
+- ✅ Variable-length generation: generate sequences of any length, including beyond training horizon
+- ✅ Progressive extension: extend sequences in chunks by reusing generated output as context
+- ✅ Comprehensive tests: 11 tests covering sampling, masking, consistency, and progressive generation
+- ⏸️ No end-to-end demo yet (stubbed for pass 4)
+- ⏸️ Simplified: denoising schedule is linear timestep interpolation; no adaptive noise variance

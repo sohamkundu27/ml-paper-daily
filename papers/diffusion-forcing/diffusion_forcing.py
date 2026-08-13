@@ -277,3 +277,132 @@ class DiffusionForcing:
             losses.append(avg_loss)
 
         return losses
+
+    @torch.no_grad()
+    def sample(self, batch_size, seq_len, num_steps=50):
+        """Generate sequences via iterative denoising.
+
+        Start with fully noisy sequence and progressively denoise.
+
+        Args:
+            batch_size: number of sequences to generate
+            seq_len: length of generated sequences
+            num_steps: number of denoising steps
+
+        Returns:
+            x_0: [batch_size, seq_len, token_dim] generated clean tokens
+        """
+        # Start with fully noisy sequence
+        x_t = torch.randn(batch_size, seq_len, self.token_dim, device=self.device)
+
+        # Denoise step by step
+        for step in range(num_steps):
+            # Current timestep (going from 1 to 0)
+            t = torch.ones(batch_size, device=self.device) * (1.0 - step / num_steps)
+
+            # Predict clean tokens at this step
+            x_pred = self.denoise(x_t, t)
+
+            # Get noise schedule for current and next step
+            alpha_t, beta_t = get_alpha_beta(t.cpu().numpy())
+            if not isinstance(alpha_t, torch.Tensor):
+                alpha_t = torch.tensor(alpha_t, dtype=torch.float32, device=self.device)
+            if not isinstance(beta_t, torch.Tensor):
+                beta_t = torch.tensor(beta_t, dtype=torch.float32, device=self.device)
+
+            alpha_t = alpha_t.view(-1, 1, 1)
+            beta_t = beta_t.view(-1, 1, 1)
+
+            # Add small amount of noise for next step (except on last step)
+            if step < num_steps - 1:
+                t_next = torch.ones(batch_size, device=self.device) * \
+                         (1.0 - (step + 1) / num_steps)
+                alpha_next, beta_next = get_alpha_beta(t_next.cpu().numpy())
+                if not isinstance(alpha_next, torch.Tensor):
+                    alpha_next = torch.tensor(alpha_next, dtype=torch.float32, device=self.device)
+                if not isinstance(beta_next, torch.Tensor):
+                    beta_next = torch.tensor(beta_next, dtype=torch.float32, device=self.device)
+
+                alpha_next = alpha_next.view(-1, 1, 1)
+                beta_next = beta_next.view(-1, 1, 1)
+
+                # Compute mean for next step
+                x_t_mean = torch.sqrt(alpha_next) * x_pred + \
+                          torch.sqrt(beta_next - beta_next ** 2 / beta_t) * (x_t - torch.sqrt(alpha_t) * x_pred) / torch.sqrt(beta_t)
+
+                # Add noise
+                noise = torch.randn_like(x_t)
+                x_t = x_t_mean + torch.sqrt(beta_next ** 2 / beta_t) * noise
+            else:
+                x_t = x_pred
+
+        return x_t
+
+    @torch.no_grad()
+    def sample_with_mask(self, context, mask, num_steps=50):
+        """Generate tokens with masking (keep past, denoise future).
+
+        This is the key feature of Diffusion Forcing: condition on past tokens
+        while denoising future tokens.
+
+        Args:
+            context: [batch_size, context_len, token_dim] tensor of context tokens
+            mask: [batch_size, total_len] boolean mask (True = keep, False = denoise)
+            num_steps: number of denoising steps
+
+        Returns:
+            x_0: [batch_size, total_len, token_dim] sequence with denoised future
+        """
+        batch_size = context.shape[0]
+        context_len = context.shape[1]
+        total_len = mask.shape[1]
+        future_len = total_len - context_len
+
+        # Initialize: context is clean, future is noisy
+        x_t = torch.randn(batch_size, total_len, self.token_dim, device=self.device)
+        x_t[:, :context_len] = context.to(self.device)
+
+        # Denoise step by step
+        for step in range(num_steps):
+            t = torch.ones(batch_size, device=self.device) * (1.0 - step / num_steps)
+
+            # Predict clean tokens
+            x_pred = self.denoise(x_t, t)
+
+            # Keep context part fixed
+            x_pred[:, :context_len] = context.to(self.device)
+
+            # Get noise schedules
+            alpha_t, beta_t = get_alpha_beta(t.cpu().numpy())
+            if not isinstance(alpha_t, torch.Tensor):
+                alpha_t = torch.tensor(alpha_t, dtype=torch.float32, device=self.device)
+            if not isinstance(beta_t, torch.Tensor):
+                beta_t = torch.tensor(beta_t, dtype=torch.float32, device=self.device)
+
+            alpha_t = alpha_t.view(-1, 1, 1)
+            beta_t = beta_t.view(-1, 1, 1)
+
+            if step < num_steps - 1:
+                t_next = torch.ones(batch_size, device=self.device) * \
+                         (1.0 - (step + 1) / num_steps)
+                alpha_next, beta_next = get_alpha_beta(t_next.cpu().numpy())
+                if not isinstance(alpha_next, torch.Tensor):
+                    alpha_next = torch.tensor(alpha_next, dtype=torch.float32, device=self.device)
+                if not isinstance(beta_next, torch.Tensor):
+                    beta_next = torch.tensor(beta_next, dtype=torch.float32, device=self.device)
+
+                alpha_next = alpha_next.view(-1, 1, 1)
+                beta_next = beta_next.view(-1, 1, 1)
+
+                x_t_mean = torch.sqrt(alpha_next) * x_pred + \
+                          torch.sqrt(beta_next - beta_next ** 2 / beta_t) * (x_t - torch.sqrt(alpha_t) * x_pred) / torch.sqrt(beta_t)
+
+                noise = torch.randn_like(x_t)
+                x_t = x_t_mean + torch.sqrt(beta_next ** 2 / beta_t) * noise
+
+                # Re-freeze context
+                x_t[:, :context_len] = context.to(self.device)
+            else:
+                x_t = x_pred
+
+        return x_t
