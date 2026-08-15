@@ -35,3 +35,16 @@ CART proposes a parameter-efficient language model that reuses a single transfor
 - No multi-head mechanism yet (single projection pass only)
 - No layer norm or residual connections (added incrementally in Pass 3)
 - No batching or position encoding (will add in later passes)
+
+**Pass 2 implementation:**
+- CartPrelude: multi-layer feedforward encoder that processes raw context
+- Separate K,V projections: independent linear transformations for expressiveness
+- Full Cart model: integrates prelude + core to show separation of encoding from refinement
+- Prelude computed once, K,V reused across all recurrent iterations (parameter efficiency)
+- Tests: prelude shape/gradients, multiple layer depths, end-to-end integration
+
+**Simplified/stubbed for Pass 2:**
+- Prelude is simple feedforward (no attention or normalization yet—added in Pass 3)
+- Single context per forward pass (no batched contexts or dynamic resizing)
+- No positional encoding for context (will add context position embeddings in Pass 3)
+- No explicit parameter count tracking (will compare vs. standard transformer in Pass 4)

@@ -1,11 +1,13 @@
 """
 CART: Context-Anchored Recurrent Transformer
 Pass 1: Core MLA block with learned LTI gate for stability
+Pass 2: Multi-layer prelude network for context encoding
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Tuple
 
 
 class CartMLABlock(nn.Module):
@@ -111,6 +113,66 @@ class LearnedLTIGate(nn.Module):
         return torch.clamp(self.alpha, 0.0, 0.99)
 
 
+class CartPrelude(nn.Module):
+    """
+    Multi-layer prelude network that encodes context into reusable K,V representations.
+
+    The prelude computes K and V once from raw context, which are then reused
+    across multiple recurrent iterations in the core. This separation of context
+    encoding from iterative refinement is key to CART's parameter efficiency.
+
+    Pass 2: multi-layer feedforward encoder with separate K,V projections.
+    """
+
+    def __init__(self, dim: int, head_dim: int, num_layers: int = 2, dropout: float = 0.0):
+        """
+        Args:
+            dim: Input context dimension
+            head_dim: Dimension per attention head (output dimension)
+            num_layers: Number of layers in the encoder (default 2)
+            dropout: Dropout rate
+        """
+        super().__init__()
+        self.dim = dim
+        self.head_dim = head_dim
+
+        # Build multi-layer feedforward encoder
+        layers = []
+        for i in range(num_layers):
+            in_d = dim if i == 0 else head_dim
+            out_d = head_dim
+            layers.append(nn.Linear(in_d, out_d))
+            if i < num_layers - 1:
+                layers.append(nn.ReLU())
+                if dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+
+        self.encoder = nn.Sequential(*layers)
+
+        # Separate learnable projections for K and V
+        self.k_proj = nn.Linear(head_dim, head_dim)
+        self.v_proj = nn.Linear(head_dim, head_dim)
+
+    def forward(self, context: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Encode context into K,V representations.
+
+        Args:
+            context: Raw context, shape (batch, ctx_len, dim)
+
+        Returns:
+            Tuple of (K, V), each with shape (batch, ctx_len, head_dim)
+        """
+        # Encode context through multi-layer feedforward
+        encoded = self.encoder(context)  # (batch, ctx_len, head_dim)
+
+        # Project to K and V (independent projections for expressiveness)
+        k = self.k_proj(encoded)  # (batch, ctx_len, head_dim)
+        v = self.v_proj(encoded)  # (batch, ctx_len, head_dim)
+
+        return k, v
+
+
 class CartRecurrentCore(nn.Module):
     """
     Recurrent core of CART: iteratively refines representation via MLA.
@@ -163,6 +225,63 @@ class CartRecurrentCore(nn.Module):
         return x
 
 
+class Cart(nn.Module):
+    """
+    Full CART model: Prelude + RecurrentCore
+
+    Demonstrates the separation of context encoding from iterative refinement.
+    The prelude encodes raw context into K,V once; the core reuses them across
+    multiple recurrent iterations, reducing per-iteration computation.
+
+    Pass 2: integrates CartPrelude with CartRecurrentCore.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        head_dim: int = 64,
+        prelude_layers: int = 2,
+        num_iterations: int = 1,
+        dropout: float = 0.0
+    ):
+        """
+        Args:
+            dim: Feature dimension (input and output)
+            head_dim: Dimension per attention head
+            prelude_layers: Number of layers in prelude encoder
+            num_iterations: Number of recurrent iterations
+            dropout: Dropout rate
+        """
+        super().__init__()
+        self.dim = dim
+        self.head_dim = head_dim
+
+        # Prelude: encodes raw context into K,V
+        self.prelude = CartPrelude(dim, head_dim, prelude_layers, dropout)
+
+        # Recurrent core: refines input using encoded K,V
+        self.core = CartRecurrentCore(dim, head_dim, num_iterations, dropout)
+
+    def forward(self, x_init: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        """
+        Full forward pass: prelude encodes context, core refines input.
+
+        Args:
+            x_init: Initial representation, shape (batch, seq_len, dim)
+            context: Raw context, shape (batch, ctx_len, dim)
+
+        Returns:
+            Refined representation, shape (batch, seq_len, dim)
+        """
+        # Prelude: encode context into K,V (computed once, reused across iterations)
+        context_k, context_v = self.prelude(context)
+
+        # Core: refine x_init using fixed K,V across recurrent iterations
+        output = self.core(x_init, context_k, context_v)
+
+        return output
+
+
 def create_dummy_context(batch: int, seq_len: int, ctx_len: int, head_dim: int, device: str = 'cpu'):
     """
     Create dummy context K,V for testing.
@@ -180,3 +299,19 @@ def create_dummy_context(batch: int, seq_len: int, ctx_len: int, head_dim: int, 
     context_k = torch.randn(batch, ctx_len, head_dim, device=device)
     context_v = torch.randn(batch, ctx_len, head_dim, device=device)
     return context_k, context_v
+
+
+def create_dummy_raw_context(batch: int, ctx_len: int, dim: int, device: str = 'cpu'):
+    """
+    Create dummy raw context for prelude processing.
+
+    Args:
+        batch: Batch size
+        ctx_len: Context length
+        dim: Feature dimension
+        device: Device to place tensors on
+
+    Returns:
+        Context tensor of shape (batch, ctx_len, dim)
+    """
+    return torch.randn(batch, ctx_len, dim, device=device)

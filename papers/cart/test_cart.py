@@ -1,9 +1,18 @@
 """
 Tests for CART Pass 1: Core MLA block with LTI gate
+Tests for CART Pass 2: Multi-layer prelude network integration
 """
 
 import torch
-from cart import CartMLABlock, LearnedLTIGate, CartRecurrentCore, create_dummy_context
+from cart import (
+    CartMLABlock,
+    LearnedLTIGate,
+    CartRecurrentCore,
+    CartPrelude,
+    Cart,
+    create_dummy_context,
+    create_dummy_raw_context,
+)
 
 
 def test_mla_block_forward_shape():
@@ -135,8 +144,123 @@ def test_recurrent_core_stability():
     assert rho < 1.0, f"Spectral radius {rho} >= 1, recurrence is unstable"
 
 
+def test_prelude_forward_shape():
+    """Test that CartPrelude produces correct K,V shapes."""
+    batch, ctx_len, dim, head_dim = 2, 20, 64, 32
+
+    prelude = CartPrelude(dim, head_dim, num_layers=2)
+    context = create_dummy_raw_context(batch, ctx_len, dim)
+
+    k, v = prelude(context)
+
+    assert k.shape == (batch, ctx_len, head_dim), f"K shape {k.shape} != {(batch, ctx_len, head_dim)}"
+    assert v.shape == (batch, ctx_len, head_dim), f"V shape {v.shape} != {(batch, ctx_len, head_dim)}"
+
+
+def test_prelude_gradient_flow():
+    """Test that gradients flow through CartPrelude."""
+    batch, ctx_len, dim, head_dim = 2, 20, 64, 32
+
+    prelude = CartPrelude(dim, head_dim, num_layers=2)
+    context = create_dummy_raw_context(batch, ctx_len, dim)
+    context.requires_grad = True
+
+    k, v = prelude(context)
+    loss = k.sum() + v.sum()
+    loss.backward()
+
+    assert context.grad is not None, "Gradient not computed for context"
+    assert prelude.encoder[0].weight.grad is not None, "Gradient not computed for encoder"
+    assert prelude.k_proj.weight.grad is not None, "Gradient not computed for k_proj"
+    assert prelude.v_proj.weight.grad is not None, "Gradient not computed for v_proj"
+
+
+def test_prelude_multiple_layers():
+    """Test CartPrelude with different layer counts."""
+    batch, ctx_len, dim, head_dim = 2, 15, 48, 32
+
+    for num_layers in [1, 2, 3, 4]:
+        prelude = CartPrelude(dim, head_dim, num_layers=num_layers)
+        context = create_dummy_raw_context(batch, ctx_len, dim)
+
+        k, v = prelude(context)
+
+        assert k.shape == (batch, ctx_len, head_dim), f"Layer {num_layers}: K shape mismatch"
+        assert v.shape == (batch, ctx_len, head_dim), f"Layer {num_layers}: V shape mismatch"
+
+
+def test_cart_forward_shape():
+    """Test that full Cart model produces correct output shape."""
+    batch, seq_len, ctx_len, dim, head_dim = 2, 10, 20, 64, 32
+
+    cart = Cart(dim, head_dim, prelude_layers=2, num_iterations=1)
+    x_init = torch.randn(batch, seq_len, dim)
+    context = create_dummy_raw_context(batch, ctx_len, dim)
+
+    output = cart(x_init, context)
+
+    assert output.shape == (batch, seq_len, dim), f"Output shape {output.shape} != {(batch, seq_len, dim)}"
+
+
+def test_cart_gradient_flow():
+    """Test that gradients flow through full Cart model."""
+    batch, seq_len, ctx_len, dim, head_dim = 2, 10, 20, 64, 32
+
+    cart = Cart(dim, head_dim, prelude_layers=2, num_iterations=1)
+    x_init = torch.randn(batch, seq_len, dim, requires_grad=True)
+    context = torch.randn(batch, ctx_len, dim, requires_grad=True)
+
+    output = cart(x_init, context)
+    loss = output.sum()
+    loss.backward()
+
+    assert x_init.grad is not None, "Gradient not computed for x_init"
+    assert context.grad is not None, "Gradient not computed for context"
+    assert cart.prelude.encoder[0].weight.grad is not None, "Gradient not computed for prelude"
+    assert cart.core.mla.q_proj.weight.grad is not None, "Gradient not computed for core"
+
+
+def test_cart_multiple_iterations():
+    """Test Cart with multiple recurrent iterations."""
+    batch, seq_len, ctx_len, dim, head_dim = 2, 10, 20, 64, 32
+
+    cart_1iter = Cart(dim, head_dim, prelude_layers=2, num_iterations=1)
+    cart_3iter = Cart(dim, head_dim, prelude_layers=2, num_iterations=3)
+
+    x_init = torch.randn(batch, seq_len, dim)
+    context = create_dummy_raw_context(batch, ctx_len, dim)
+
+    output_1 = cart_1iter(x_init, context)
+    output_3 = cart_3iter(x_init, context)
+
+    assert output_1.shape == (batch, seq_len, dim), "1-iter output shape mismatch"
+    assert output_3.shape == (batch, seq_len, dim), "3-iter output shape mismatch"
+
+    # Outputs should differ due to different iteration counts
+    assert not torch.allclose(output_1, output_3), "Outputs should differ with different iterations"
+
+
+def test_cart_end_to_end():
+    """End-to-end integration test: prelude → core refinement."""
+    batch, seq_len, ctx_len, dim, head_dim = 1, 5, 10, 32, 16
+
+    cart = Cart(dim, head_dim, prelude_layers=2, num_iterations=2)
+
+    x_init = torch.ones(batch, seq_len, dim) * 0.1
+    context = torch.ones(batch, ctx_len, dim) * 0.05
+
+    output = cart(x_init, context)
+
+    # Check stability
+    assert not torch.isnan(output).any(), "Output contains NaN"
+    assert not torch.isinf(output).any(), "Output contains Inf"
+
+    # Output should differ from input (due to MLA and gate)
+    assert not torch.allclose(output, x_init, atol=1e-5), "Output should differ from input"
+
+
 if __name__ == "__main__":
-    # Run tests
+    # Run Pass 1 tests
     test_mla_block_forward_shape()
     print("✓ test_mla_block_forward_shape")
 
@@ -160,5 +284,27 @@ if __name__ == "__main__":
 
     test_recurrent_core_stability()
     print("✓ test_recurrent_core_stability")
+
+    # Run Pass 2 tests
+    test_prelude_forward_shape()
+    print("✓ test_prelude_forward_shape")
+
+    test_prelude_gradient_flow()
+    print("✓ test_prelude_gradient_flow")
+
+    test_prelude_multiple_layers()
+    print("✓ test_prelude_multiple_layers")
+
+    test_cart_forward_shape()
+    print("✓ test_cart_forward_shape")
+
+    test_cart_gradient_flow()
+    print("✓ test_cart_gradient_flow")
+
+    test_cart_multiple_iterations()
+    print("✓ test_cart_multiple_iterations")
+
+    test_cart_end_to_end()
+    print("✓ test_cart_end_to_end")
 
     print("\nAll tests passed!")
