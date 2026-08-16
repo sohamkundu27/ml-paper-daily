@@ -2,12 +2,13 @@
 CART: Context-Anchored Recurrent Transformer
 Pass 1: Core MLA block with learned LTI gate for stability
 Pass 2: Multi-layer prelude network for context encoding
+Pass 3: Stacked recurrent iterations with residual + layer norm, plus sequence classification task
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple
+from typing import Tuple, Optional
 
 
 class CartMLABlock(nn.Module):
@@ -178,6 +179,7 @@ class CartRecurrentCore(nn.Module):
     Recurrent core of CART: iteratively refines representation via MLA.
 
     Pass 1 simplified: single recurrent iteration over a fixed context.
+    Pass 3: adds layer normalization and residual connections.
     """
 
     def __init__(self, dim: int, head_dim: int = 64, num_iterations: int = 1, dropout: float = 0.0):
@@ -185,7 +187,7 @@ class CartRecurrentCore(nn.Module):
         Args:
             dim: Feature dimension
             head_dim: Dimension per attention head
-            num_iterations: Number of recurrent iterations (pass 1 uses 1)
+            num_iterations: Number of recurrent iterations
             dropout: Dropout rate
         """
         super().__init__()
@@ -197,6 +199,9 @@ class CartRecurrentCore(nn.Module):
 
         # LTI gate for stability
         self.lti_gate = LearnedLTIGate(init_alpha=0.8)
+
+        # Layer normalization for stable stacking (Pass 3)
+        self.norm = nn.LayerNorm(dim)
 
     def forward(
         self,
@@ -216,11 +221,15 @@ class CartRecurrentCore(nn.Module):
         x = x_init
 
         for _ in range(self.num_iterations):
-            # Apply MLA block
+            # Apply MLA block with residual connection and layer norm
+            residual = x
             y = self.mla(x, context_k, context_v)
 
             # Recurrent update via LTI gate
-            x = self.lti_gate(x, y)
+            x = self.lti_gate(residual, y)
+
+            # Apply layer normalization (Pass 3)
+            x = self.norm(x)
 
         return x
 
@@ -234,6 +243,7 @@ class Cart(nn.Module):
     multiple recurrent iterations, reducing per-iteration computation.
 
     Pass 2: integrates CartPrelude with CartRecurrentCore.
+    Pass 3: adds residual connections and layer norm to core.
     """
 
     def __init__(
@@ -282,6 +292,65 @@ class Cart(nn.Module):
         return output
 
 
+class CartSequenceClassifier(nn.Module):
+    """
+    Sequence-level classification task on top of CART.
+
+    Pass 3: Simple task to demonstrate sequence-level reasoning.
+    Task: predict if a sequence length is above a threshold.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        head_dim: int = 64,
+        prelude_layers: int = 2,
+        num_iterations: int = 1,
+        dropout: float = 0.0,
+        num_classes: int = 2
+    ):
+        """
+        Args:
+            dim: Feature dimension
+            head_dim: Dimension per attention head
+            prelude_layers: Number of layers in prelude
+            num_iterations: Number of recurrent iterations
+            dropout: Dropout rate
+            num_classes: Number of output classes (default: binary classification)
+        """
+        super().__init__()
+        self.cart = Cart(dim, head_dim, prelude_layers, num_iterations, dropout)
+
+        # Simple pooling + classification head
+        self.pool_norm = nn.LayerNorm(dim)
+        self.classifier = nn.Linear(dim, num_classes)
+
+    def forward(self, x_init: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for sequence classification.
+
+        Args:
+            x_init: Initial sequence representation, shape (batch, seq_len, dim)
+            context: Context, shape (batch, ctx_len, dim)
+
+        Returns:
+            Logits for classification, shape (batch, num_classes)
+        """
+        # Get refined representation
+        refined = self.cart(x_init, context)
+
+        # Mean pooling over sequence dimension
+        pooled = refined.mean(dim=1)  # (batch, dim)
+
+        # Normalize before classification
+        pooled = self.pool_norm(pooled)
+
+        # Classification
+        logits = self.classifier(pooled)
+
+        return logits
+
+
 def create_dummy_context(batch: int, seq_len: int, ctx_len: int, head_dim: int, device: str = 'cpu'):
     """
     Create dummy context K,V for testing.
@@ -315,3 +384,152 @@ def create_dummy_raw_context(batch: int, ctx_len: int, dim: int, device: str = '
         Context tensor of shape (batch, ctx_len, dim)
     """
     return torch.randn(batch, ctx_len, dim, device=device)
+
+
+def create_synthetic_length_classification_dataset(
+    num_samples: int,
+    seq_len_range: Tuple[int, int],
+    ctx_len: int,
+    dim: int,
+    threshold: int = 8,
+    device: str = 'cpu'
+):
+    """
+    Create synthetic dataset for sequence length classification task.
+
+    Task: Predict if sequence length is >= threshold.
+
+    Args:
+        num_samples: Number of samples
+        seq_len_range: (min_seq_len, max_seq_len)
+        ctx_len: Context length
+        dim: Feature dimension
+        threshold: Length threshold for classification
+        device: Device to place tensors on
+
+    Returns:
+        Tuple of (inputs, contexts, labels)
+        - inputs: shape (num_samples, seq_len, dim)
+        - contexts: shape (num_samples, ctx_len, dim)
+        - labels: shape (num_samples,) with values in {0, 1}
+    """
+    min_len, max_len = seq_len_range
+
+    inputs = []
+    contexts = []
+    labels = []
+
+    for _ in range(num_samples):
+        # Random sequence length
+        seq_len = torch.randint(min_len, max_len + 1, (1,)).item()
+
+        # Random input sequence
+        x = torch.randn(seq_len, dim, device=device)
+        inputs.append(x)
+
+        # Random context
+        ctx = torch.randn(ctx_len, dim, device=device)
+        contexts.append(ctx)
+
+        # Label: 1 if seq_len >= threshold else 0
+        label = torch.tensor(1 if seq_len >= threshold else 0, device=device)
+        labels.append(label)
+
+    # Pad inputs and contexts to fixed lengths for batching
+    max_seq_len = max_len
+    padded_inputs = torch.zeros(num_samples, max_seq_len, dim, device=device)
+    padded_contexts = torch.zeros(num_samples, ctx_len, dim, device=device)
+
+    for i, (inp, ctx) in enumerate(zip(inputs, contexts)):
+        padded_inputs[i, :inp.shape[0], :] = inp
+        padded_contexts[i, :, :] = ctx
+
+    labels = torch.stack(labels)
+
+    return padded_inputs, padded_contexts, labels
+
+
+def train_classifier_step(
+    model: CartSequenceClassifier,
+    batch_inputs: torch.Tensor,
+    batch_contexts: torch.Tensor,
+    batch_labels: torch.Tensor,
+    optimizer: torch.optim.Optimizer,
+    loss_fn: nn.Module
+) -> float:
+    """
+    Single training step for CartSequenceClassifier.
+
+    Args:
+        model: Classifier model
+        batch_inputs: Input batch, shape (batch, seq_len, dim)
+        batch_contexts: Context batch, shape (batch, ctx_len, dim)
+        batch_labels: Label batch, shape (batch,)
+        optimizer: Optimizer
+        loss_fn: Loss function
+
+    Returns:
+        Loss value
+    """
+    optimizer.zero_grad()
+
+    # Forward pass
+    logits = model(batch_inputs, batch_contexts)
+
+    # Compute loss
+    loss = loss_fn(logits, batch_labels)
+
+    # Backward pass
+    loss.backward()
+    optimizer.step()
+
+    return loss.item()
+
+
+def evaluate_classifier(
+    model: CartSequenceClassifier,
+    inputs: torch.Tensor,
+    contexts: torch.Tensor,
+    labels: torch.Tensor,
+    batch_size: int = 32
+) -> Tuple[float, float]:
+    """
+    Evaluate classifier on a dataset.
+
+    Args:
+        model: Classifier model
+        inputs: Input data, shape (num_samples, seq_len, dim)
+        contexts: Context data, shape (num_samples, ctx_len, dim)
+        labels: Label data, shape (num_samples,)
+        batch_size: Batch size for evaluation
+
+    Returns:
+        Tuple of (avg_loss, accuracy)
+    """
+    model.eval()
+    loss_fn = nn.CrossEntropyLoss()
+
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
+
+    with torch.no_grad():
+        for i in range(0, len(inputs), batch_size):
+            batch_end = min(i + batch_size, len(inputs))
+            batch_inputs = inputs[i:batch_end]
+            batch_contexts = contexts[i:batch_end]
+            batch_labels = labels[i:batch_end]
+
+            logits = model(batch_inputs, batch_contexts)
+            loss = loss_fn(logits, batch_labels)
+
+            total_loss += loss.item() * (batch_end - i)
+            total_correct += (logits.argmax(dim=1) == batch_labels).sum().item()
+            total_samples += batch_end - i
+
+    avg_loss = total_loss / total_samples
+    accuracy = total_correct / total_samples
+
+    model.train()
+
+    return avg_loss, accuracy

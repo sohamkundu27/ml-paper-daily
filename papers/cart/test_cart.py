@@ -1,17 +1,23 @@
 """
 Tests for CART Pass 1: Core MLA block with LTI gate
 Tests for CART Pass 2: Multi-layer prelude network integration
+Tests for CART Pass 3: Stacked recurrent iterations with layer norm and sequence classification task
 """
 
 import torch
+import torch.nn as nn
 from cart import (
     CartMLABlock,
     LearnedLTIGate,
     CartRecurrentCore,
     CartPrelude,
     Cart,
+    CartSequenceClassifier,
     create_dummy_context,
     create_dummy_raw_context,
+    create_synthetic_length_classification_dataset,
+    train_classifier_step,
+    evaluate_classifier,
 )
 
 
@@ -259,6 +265,166 @@ def test_cart_end_to_end():
     assert not torch.allclose(output, x_init, atol=1e-5), "Output should differ from input"
 
 
+def test_recurrent_core_layer_norm():
+    """Test that CartRecurrentCore has layer norm (Pass 3)."""
+    batch, seq_len, dim, ctx_len, head_dim = 2, 10, 64, 20, 32
+
+    core = CartRecurrentCore(dim, head_dim, num_iterations=2)
+
+    # Check that layer norm exists
+    assert hasattr(core, 'norm'), "CartRecurrentCore should have layer norm in Pass 3"
+    assert isinstance(core.norm, nn.LayerNorm), "norm should be LayerNorm"
+
+    x_init = torch.randn(batch, seq_len, dim)
+    context_k, context_v = create_dummy_context(batch, seq_len, ctx_len, head_dim)
+
+    output = core(x_init, context_k, context_v)
+
+    # Output should be stable
+    assert not torch.isnan(output).any(), "Output contains NaN"
+    assert not torch.isinf(output).any(), "Output contains Inf"
+
+
+def test_recurrent_core_residual_stability():
+    """Test that residual connections maintain stability across iterations."""
+    batch, seq_len, dim, ctx_len, head_dim = 1, 5, 32, 10, 16
+
+    # Many iterations to test stability of residual + norm
+    core = CartRecurrentCore(dim, head_dim, num_iterations=5)
+
+    x_init = torch.ones(batch, seq_len, dim) * 0.1
+    context_k = torch.ones(batch, ctx_len, head_dim) * 0.05
+    context_v = torch.ones(batch, ctx_len, head_dim) * 0.05
+
+    output = core(x_init, context_k, context_v)
+
+    # Check stability
+    assert not torch.isnan(output).any(), "Output contains NaN"
+    assert not torch.isinf(output).any(), "Output contains Inf"
+
+
+def test_sequence_classifier_forward_shape():
+    """Test CartSequenceClassifier forward pass."""
+    batch, seq_len, ctx_len, dim, head_dim = 2, 10, 20, 64, 32
+
+    classifier = CartSequenceClassifier(dim, head_dim, prelude_layers=2, num_iterations=2, num_classes=2)
+    x_init = torch.randn(batch, seq_len, dim)
+    context = create_dummy_raw_context(batch, ctx_len, dim)
+
+    logits = classifier(x_init, context)
+
+    assert logits.shape == (batch, 2), f"Expected shape (batch, 2), got {logits.shape}"
+
+
+def test_sequence_classifier_gradient_flow():
+    """Test that gradients flow through CartSequenceClassifier."""
+    batch, seq_len, ctx_len, dim, head_dim = 2, 10, 20, 64, 32
+
+    classifier = CartSequenceClassifier(dim, head_dim, prelude_layers=2, num_iterations=2)
+    x_init = torch.randn(batch, seq_len, dim, requires_grad=True)
+    context = torch.randn(batch, ctx_len, dim, requires_grad=True)
+
+    logits = classifier(x_init, context)
+    loss = logits.sum()
+    loss.backward()
+
+    assert x_init.grad is not None, "Gradient not computed for x_init"
+    assert context.grad is not None, "Gradient not computed for context"
+
+
+def test_synthetic_dataset_creation():
+    """Test synthetic length classification dataset creation."""
+    num_samples, seq_len_range, ctx_len, dim, threshold = 100, (5, 15), 20, 64, 8
+
+    inputs, contexts, labels = create_synthetic_length_classification_dataset(
+        num_samples, seq_len_range, ctx_len, dim, threshold
+    )
+
+    assert inputs.shape == (num_samples, seq_len_range[1], dim), f"Input shape mismatch: {inputs.shape}"
+    assert contexts.shape == (num_samples, ctx_len, dim), f"Context shape mismatch: {contexts.shape}"
+    assert labels.shape == (num_samples,), f"Label shape mismatch: {labels.shape}"
+
+    # Labels should be binary
+    assert set(labels.tolist()) <= {0, 1}, "Labels should be binary"
+
+
+def test_classifier_training_step():
+    """Test single training step for sequence classifier."""
+    batch, seq_len, ctx_len, dim, head_dim = 4, 10, 20, 64, 32
+
+    classifier = CartSequenceClassifier(dim, head_dim, prelude_layers=2, num_iterations=2)
+    optimizer = torch.optim.Adam(classifier.parameters(), lr=0.001)
+    loss_fn = nn.CrossEntropyLoss()
+
+    x_init = torch.randn(batch, seq_len, dim)
+    context = torch.randn(batch, ctx_len, dim)
+    labels = torch.randint(0, 2, (batch,))
+
+    # Record initial loss
+    with torch.no_grad():
+        initial_logits = classifier(x_init, context)
+        initial_loss = loss_fn(initial_logits, labels).item()
+
+    # Training step
+    loss_val = train_classifier_step(classifier, x_init, context, labels, optimizer, loss_fn)
+
+    assert isinstance(loss_val, float), "Loss should be a float"
+    assert loss_val > 0, "Loss should be positive"
+
+
+def test_classifier_evaluation():
+    """Test evaluation function for sequence classifier."""
+    num_samples, seq_len, ctx_len, dim, head_dim = 20, 10, 20, 64, 32
+
+    classifier = CartSequenceClassifier(dim, head_dim, prelude_layers=2, num_iterations=2)
+
+    inputs = torch.randn(num_samples, seq_len, dim)
+    contexts = torch.randn(num_samples, ctx_len, dim)
+    labels = torch.randint(0, 2, (num_samples,))
+
+    loss, accuracy = evaluate_classifier(classifier, inputs, contexts, labels, batch_size=4)
+
+    assert isinstance(loss, float), "Loss should be a float"
+    assert isinstance(accuracy, float), "Accuracy should be a float"
+    assert 0.0 <= accuracy <= 1.0, f"Accuracy should be in [0, 1], got {accuracy}"
+
+
+def test_classifier_full_pipeline():
+    """End-to-end test: create dataset, train, and evaluate."""
+    # Create synthetic dataset
+    num_train, num_val = 50, 20
+    seq_len_range, ctx_len, dim, threshold = (5, 15), 20, 32, 8
+
+    train_inputs, train_contexts, train_labels = create_synthetic_length_classification_dataset(
+        num_train, seq_len_range, ctx_len, dim, threshold
+    )
+    val_inputs, val_contexts, val_labels = create_synthetic_length_classification_dataset(
+        num_val, seq_len_range, ctx_len, dim, threshold
+    )
+
+    # Create classifier
+    classifier = CartSequenceClassifier(dim, head_dim=16, prelude_layers=1, num_iterations=2)
+    optimizer = torch.optim.Adam(classifier.parameters(), lr=0.01)
+    loss_fn = nn.CrossEntropyLoss()
+
+    # Quick training loop (just 3 epochs to verify it runs)
+    batch_size = 8
+    for epoch in range(3):
+        for i in range(0, num_train, batch_size):
+            batch_end = min(i + batch_size, num_train)
+            batch_inputs = train_inputs[i:batch_end]
+            batch_contexts = train_contexts[i:batch_end]
+            batch_labels = train_labels[i:batch_end]
+
+            train_classifier_step(classifier, batch_inputs, batch_contexts, batch_labels, optimizer, loss_fn)
+
+    # Evaluate
+    val_loss, val_acc = evaluate_classifier(classifier, val_inputs, val_contexts, val_labels)
+
+    assert not torch.isnan(torch.tensor(val_loss)), "Validation loss is NaN"
+    assert 0.0 <= val_acc <= 1.0, "Validation accuracy out of range"
+
+
 if __name__ == "__main__":
     # Run Pass 1 tests
     test_mla_block_forward_shape()
@@ -306,5 +472,30 @@ if __name__ == "__main__":
 
     test_cart_end_to_end()
     print("✓ test_cart_end_to_end")
+
+    # Run Pass 3 tests
+    test_recurrent_core_layer_norm()
+    print("✓ test_recurrent_core_layer_norm")
+
+    test_recurrent_core_residual_stability()
+    print("✓ test_recurrent_core_residual_stability")
+
+    test_sequence_classifier_forward_shape()
+    print("✓ test_sequence_classifier_forward_shape")
+
+    test_sequence_classifier_gradient_flow()
+    print("✓ test_sequence_classifier_gradient_flow")
+
+    test_synthetic_dataset_creation()
+    print("✓ test_synthetic_dataset_creation")
+
+    test_classifier_training_step()
+    print("✓ test_classifier_training_step")
+
+    test_classifier_evaluation()
+    print("✓ test_classifier_evaluation")
+
+    test_classifier_full_pipeline()
+    print("✓ test_classifier_full_pipeline")
 
     print("\nAll tests passed!")

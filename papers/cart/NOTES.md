@@ -48,3 +48,18 @@ CART proposes a parameter-efficient language model that reuses a single transfor
 - Single context per forward pass (no batched contexts or dynamic resizing)
 - No positional encoding for context (will add context position embeddings in Pass 3)
 - No explicit parameter count tracking (will compare vs. standard transformer in Pass 4)
+
+**Pass 3 implementation:**
+- Layer normalization in CartRecurrentCore: stabilizes stacking across multiple iterations
+- Explicit residual connections: x_new = α * residual + y (input added back via LTI gate)
+- CartSequenceClassifier: sequence-level classification on top of CART for demonstrating task performance
+- Synthetic task: binary classification on sequence length (predict if seq_len >= threshold)
+- Dataset creation and training utilities: full pipeline for training and evaluation
+- Full test coverage: 8 new tests for Pass 3 components, all passing
+
+**Simplified/stubbed for Pass 3:**
+- Task is synthetic length classification (simple proof-of-concept; could extend to language modeling in Pass 4)
+- No explicit positional encoding yet (context is treated as unordered bag of features)
+- No beam search or decoding strategies (will add in Pass 4 for language generation)
+- Model trained on small synthetic dataset (large-scale training deferred to Pass 4)
+- Parameter efficiency not yet quantified (will compare vs. baseline transformer in Pass 4)
