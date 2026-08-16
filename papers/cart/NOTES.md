@@ -63,3 +63,21 @@ CART proposes a parameter-efficient language model that reuses a single transfor
 - No beam search or decoding strategies (will add in Pass 4 for language generation)
 - Model trained on small synthetic dataset (large-scale training deferred to Pass 4)
 - Parameter efficiency not yet quantified (will compare vs. baseline transformer in Pass 4)
+
+**Pass 4 implementation:**
+- CartLanguageModel: Language model using CART for next-token prediction on synthetic sequences
+- StandardTransformerBaseline: Standard transformer encoder with similar capacity for fair comparison
+- Synthetic language dataset: Random token sequences with context and next-token targets
+- End-to-end demo (demo_pass4.py): Complete pipeline showing training, convergence, and parameter comparison
+- Parameter counting utilities: Quantifies parameter efficiency gains of CART architecture
+- Training and evaluation functions: Full training loop for both models on language task
+- Pass 4 tests: 8 new tests covering language models, datasets, parameter counting, training
+- Key result: CART achieves parameter efficiency through reusing single transformer block across recurrent iterations vs. full transformer stack
+
+**Simplified/stubbed for Pass 4:**
+- Language task is synthetic (random tokens with simple next-token prediction)
+- No positional encodings beyond learned embedding (standard transformer also uses only learned embeddings for fair comparison)
+- No beam search, sampling, or advanced decoding strategies
+- Training on small synthetic dataset (200 train, 50 val) for demonstration only
+- Comparison uses 1-layer transformer to match CART parameter count (full transformer would be larger)
+- No large-scale training or language benchmark evaluation

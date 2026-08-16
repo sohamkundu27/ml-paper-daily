@@ -13,11 +13,17 @@ from cart import (
     CartPrelude,
     Cart,
     CartSequenceClassifier,
+    CartLanguageModel,
+    StandardTransformerBaseline,
     create_dummy_context,
     create_dummy_raw_context,
     create_synthetic_length_classification_dataset,
+    create_synthetic_language_dataset,
     train_classifier_step,
     evaluate_classifier,
+    count_parameters,
+    train_lm_step,
+    evaluate_lm,
 )
 
 
@@ -425,6 +431,167 @@ def test_classifier_full_pipeline():
     assert 0.0 <= val_acc <= 1.0, "Validation accuracy out of range"
 
 
+def test_cart_language_model_forward_shape():
+    """Test CartLanguageModel forward pass shape."""
+    batch, seq_len, ctx_len, vocab_size, dim = 2, 10, 8, 256, 64
+
+    lm = CartLanguageModel(vocab_size, dim, head_dim=32, prelude_layers=2, num_iterations=2)
+    input_ids = torch.randint(0, vocab_size, (batch, seq_len))
+    context_ids = torch.randint(0, vocab_size, (batch, ctx_len))
+
+    logits = lm(input_ids, context_ids)
+
+    assert logits.shape == (batch, seq_len, vocab_size), f"Expected {(batch, seq_len, vocab_size)}, got {logits.shape}"
+
+
+def test_cart_language_model_gradient_flow():
+    """Test that gradients flow through CartLanguageModel."""
+    batch, seq_len, ctx_len, vocab_size, dim = 2, 10, 8, 256, 64
+
+    lm = CartLanguageModel(vocab_size, dim, head_dim=32, prelude_layers=2, num_iterations=2)
+    input_ids = torch.randint(0, vocab_size, (batch, seq_len))
+    context_ids = torch.randint(0, vocab_size, (batch, ctx_len))
+
+    logits = lm(input_ids, context_ids)
+    loss = logits.sum()
+    loss.backward()
+
+    assert lm.embed.weight.grad is not None, "Gradient not computed for embedding"
+    assert lm.output_proj.weight.grad is not None, "Gradient not computed for output projection"
+    assert lm.cart.prelude.encoder[0].weight.grad is not None, "Gradient not computed for prelude"
+
+
+def test_transformer_baseline_forward_shape():
+    """Test StandardTransformerBaseline forward pass shape."""
+    batch, seq_len, vocab_size, dim = 2, 10, 256, 64
+
+    transformer = StandardTransformerBaseline(vocab_size, dim, num_heads=4, num_layers=1)
+    input_ids = torch.randint(0, vocab_size, (batch, seq_len))
+
+    logits = transformer(input_ids)
+
+    assert logits.shape == (batch, seq_len, vocab_size), f"Expected {(batch, seq_len, vocab_size)}, got {logits.shape}"
+
+
+def test_transformer_baseline_gradient_flow():
+    """Test that gradients flow through StandardTransformerBaseline."""
+    batch, seq_len, vocab_size, dim = 2, 10, 256, 64
+
+    transformer = StandardTransformerBaseline(vocab_size, dim, num_heads=4, num_layers=1)
+    input_ids = torch.randint(0, vocab_size, (batch, seq_len))
+
+    logits = transformer(input_ids)
+    loss = logits.sum()
+    loss.backward()
+
+    assert transformer.embed.weight.grad is not None, "Gradient not computed for embedding"
+    assert transformer.output_proj.weight.grad is not None, "Gradient not computed for output projection"
+
+
+def test_synthetic_language_dataset():
+    """Test synthetic language dataset creation."""
+    num_samples, seq_len, ctx_len, vocab_size = 50, 10, 8, 256
+
+    input_ids, context_ids, target_ids = create_synthetic_language_dataset(
+        num_samples, seq_len, ctx_len, vocab_size
+    )
+
+    assert input_ids.shape == (num_samples, seq_len), f"Input shape mismatch: {input_ids.shape}"
+    assert context_ids.shape == (num_samples, ctx_len), f"Context shape mismatch: {context_ids.shape}"
+    assert target_ids.shape == (num_samples, seq_len), f"Target shape mismatch: {target_ids.shape}"
+
+    # Check all IDs are valid
+    assert (input_ids >= 0).all() and (input_ids < vocab_size).all(), "Invalid input IDs"
+    assert (context_ids >= 0).all() and (context_ids < vocab_size).all(), "Invalid context IDs"
+    assert (target_ids >= 0).all() and (target_ids < vocab_size).all(), "Invalid target IDs"
+
+
+def test_count_parameters():
+    """Test parameter counting."""
+    vocab_size, dim = 256, 64
+
+    cart_lm = CartLanguageModel(vocab_size, dim, head_dim=32, prelude_layers=2, num_iterations=2)
+    transformer = StandardTransformerBaseline(vocab_size, dim, num_heads=4, num_layers=1)
+
+    cart_params = count_parameters(cart_lm)
+    transformer_params = count_parameters(transformer)
+
+    assert cart_params > 0, "CART should have parameters"
+    assert transformer_params > 0, "Transformer should have parameters"
+    assert isinstance(cart_params, int), "Parameter count should be int"
+    assert isinstance(transformer_params, int), "Parameter count should be int"
+
+
+def test_lm_training_step():
+    """Test single training step for language model."""
+    batch, seq_len, ctx_len, vocab_size, dim = 4, 10, 8, 256, 64
+
+    lm = CartLanguageModel(vocab_size, dim, head_dim=32, prelude_layers=2, num_iterations=2)
+    optimizer = torch.optim.Adam(lm.parameters(), lr=0.001)
+    loss_fn = nn.CrossEntropyLoss()
+
+    input_ids = torch.randint(0, vocab_size, (batch, seq_len))
+    context_ids = torch.randint(0, vocab_size, (batch, ctx_len))
+    target_ids = torch.randint(0, vocab_size, (batch, seq_len))
+
+    loss = train_lm_step(lm, input_ids, context_ids, target_ids, optimizer, loss_fn, is_cart=True)
+
+    assert isinstance(loss, float), "Loss should be a float"
+    assert loss > 0, "Loss should be positive"
+
+
+def test_lm_evaluation():
+    """Test language model evaluation."""
+    num_samples, seq_len, ctx_len, vocab_size, dim = 20, 10, 8, 256, 64
+
+    lm = CartLanguageModel(vocab_size, dim, head_dim=32, prelude_layers=2, num_iterations=2)
+
+    input_ids = torch.randint(0, vocab_size, (num_samples, seq_len))
+    context_ids = torch.randint(0, vocab_size, (num_samples, ctx_len))
+    target_ids = torch.randint(0, vocab_size, (num_samples, seq_len))
+
+    loss = evaluate_lm(lm, input_ids, context_ids, target_ids, batch_size=4, is_cart=True)
+
+    assert isinstance(loss, float), "Loss should be a float"
+    assert loss > 0, "Loss should be positive"
+
+
+def test_lm_end_to_end_training():
+    """End-to-end test: create dataset, train CART LM, and evaluate."""
+    vocab_size, dim = 128, 32
+    num_train, num_val = 30, 10
+
+    # Create dataset
+    train_input_ids, train_context_ids, train_target_ids = create_synthetic_language_dataset(
+        num_train, 8, 4, vocab_size
+    )
+    val_input_ids, val_context_ids, val_target_ids = create_synthetic_language_dataset(
+        num_val, 8, 4, vocab_size
+    )
+
+    # Create model
+    lm = CartLanguageModel(vocab_size, dim, head_dim=16, prelude_layers=1, num_iterations=1)
+    optimizer = torch.optim.Adam(lm.parameters(), lr=0.01)
+    loss_fn = nn.CrossEntropyLoss()
+
+    # Quick training
+    batch_size = 4
+    for epoch in range(2):
+        for i in range(0, num_train, batch_size):
+            batch_end = min(i + batch_size, num_train)
+            batch_input = train_input_ids[i:batch_end]
+            batch_context = train_context_ids[i:batch_end]
+            batch_target = train_target_ids[i:batch_end]
+
+            train_lm_step(lm, batch_input, batch_context, batch_target, optimizer, loss_fn, is_cart=True)
+
+    # Evaluate
+    val_loss = evaluate_lm(lm, val_input_ids, val_context_ids, val_target_ids, is_cart=True)
+
+    assert not torch.isnan(torch.tensor(val_loss)), "Validation loss is NaN"
+    assert val_loss > 0, "Validation loss should be positive"
+
+
 if __name__ == "__main__":
     # Run Pass 1 tests
     test_mla_block_forward_shape()
@@ -497,5 +664,33 @@ if __name__ == "__main__":
 
     test_classifier_full_pipeline()
     print("✓ test_classifier_full_pipeline")
+
+    # Run Pass 4 tests
+    test_cart_language_model_forward_shape()
+    print("✓ test_cart_language_model_forward_shape")
+
+    test_cart_language_model_gradient_flow()
+    print("✓ test_cart_language_model_gradient_flow")
+
+    test_transformer_baseline_forward_shape()
+    print("✓ test_transformer_baseline_forward_shape")
+
+    test_transformer_baseline_gradient_flow()
+    print("✓ test_transformer_baseline_gradient_flow")
+
+    test_synthetic_language_dataset()
+    print("✓ test_synthetic_language_dataset")
+
+    test_count_parameters()
+    print("✓ test_count_parameters")
+
+    test_lm_training_step()
+    print("✓ test_lm_training_step")
+
+    test_lm_evaluation()
+    print("✓ test_lm_evaluation")
+
+    test_lm_end_to_end_training()
+    print("✓ test_lm_end_to_end_training")
 
     print("\nAll tests passed!")

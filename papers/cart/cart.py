@@ -533,3 +533,275 @@ def evaluate_classifier(
     model.train()
 
     return avg_loss, accuracy
+
+
+class CartLanguageModel(nn.Module):
+    """
+    Simple language model using CART for token prediction.
+
+    Pass 4: Demonstrates CART in a language modeling task.
+    Given a context (previous tokens), predicts the next token.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        dim: int,
+        head_dim: int = 64,
+        prelude_layers: int = 2,
+        num_iterations: int = 2,
+        dropout: float = 0.0
+    ):
+        """
+        Args:
+            vocab_size: Size of vocabulary
+            dim: Feature dimension
+            head_dim: Dimension per attention head
+            prelude_layers: Number of layers in prelude
+            num_iterations: Number of recurrent iterations
+            dropout: Dropout rate
+        """
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.dim = dim
+
+        # Token embeddings
+        self.embed = nn.Embedding(vocab_size, dim)
+
+        # CART model: context encoding + refinement
+        self.cart = Cart(dim, head_dim, prelude_layers, num_iterations, dropout)
+
+        # Output projection to vocab
+        self.output_proj = nn.Linear(dim, vocab_size)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        context_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Forward pass for language model.
+
+        Args:
+            input_ids: Input token IDs, shape (batch, seq_len)
+            context_ids: Context token IDs, shape (batch, ctx_len)
+
+        Returns:
+            Logits for next token prediction, shape (batch, seq_len, vocab_size)
+        """
+        # Embed tokens
+        x_init = self.embed(input_ids)  # (batch, seq_len, dim)
+        context = self.embed(context_ids)  # (batch, ctx_len, dim)
+
+        # Apply CART
+        refined = self.cart(x_init, context)  # (batch, seq_len, dim)
+
+        # Project to vocabulary
+        logits = self.output_proj(refined)  # (batch, seq_len, vocab_size)
+
+        return logits
+
+
+class StandardTransformerBaseline(nn.Module):
+    """
+    Standard transformer encoder for comparison with CART.
+
+    This is a simple stack of transformer encoder layers for fair parameter comparison.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        dim: int,
+        num_heads: int = 4,
+        num_layers: int = 2,
+        ff_dim: int = 256,
+        dropout: float = 0.0
+    ):
+        """
+        Args:
+            vocab_size: Size of vocabulary
+            dim: Feature dimension
+            num_heads: Number of attention heads
+            num_layers: Number of transformer layers
+            ff_dim: Feedforward dimension
+            dropout: Dropout rate
+        """
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.dim = dim
+
+        # Token embeddings
+        self.embed = nn.Embedding(vocab_size, dim)
+
+        # Standard transformer encoder layers
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=dim,
+            nhead=num_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # Output projection to vocab
+        self.output_proj = nn.Linear(dim, vocab_size)
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for transformer baseline.
+
+        Args:
+            input_ids: Input token IDs, shape (batch, seq_len)
+
+        Returns:
+            Logits for token prediction, shape (batch, seq_len, vocab_size)
+        """
+        # Embed tokens
+        x = self.embed(input_ids)  # (batch, seq_len, dim)
+
+        # Apply transformer
+        refined = self.encoder(x)  # (batch, seq_len, dim)
+
+        # Project to vocabulary
+        logits = self.output_proj(refined)  # (batch, seq_len, vocab_size)
+
+        return logits
+
+
+def create_synthetic_language_dataset(
+    num_samples: int,
+    seq_len: int,
+    ctx_len: int,
+    vocab_size: int,
+    device: str = 'cpu'
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Create synthetic dataset for language modeling.
+
+    Args:
+        num_samples: Number of samples
+        seq_len: Input sequence length
+        ctx_len: Context length
+        vocab_size: Vocabulary size
+        device: Device to place tensors on
+
+    Returns:
+        Tuple of (input_ids, context_ids, target_ids)
+        - input_ids: shape (num_samples, seq_len)
+        - context_ids: shape (num_samples, ctx_len)
+        - target_ids: shape (num_samples, seq_len) -- next token in each position
+    """
+    input_ids = torch.randint(0, vocab_size, (num_samples, seq_len), device=device)
+    context_ids = torch.randint(0, vocab_size, (num_samples, ctx_len), device=device)
+    # Target: simple next-token prediction (shift input by 1, last position is random)
+    target_ids = torch.cat([
+        input_ids[:, 1:],
+        torch.randint(0, vocab_size, (num_samples, 1), device=device)
+    ], dim=1)
+
+    return input_ids, context_ids, target_ids
+
+
+def count_parameters(model: nn.Module) -> int:
+    """Count total trainable parameters in a model."""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def train_lm_step(
+    model: nn.Module,
+    batch_input_ids: torch.Tensor,
+    batch_context_ids: torch.Tensor,
+    batch_target_ids: torch.Tensor,
+    optimizer: torch.optim.Optimizer,
+    loss_fn: nn.Module,
+    is_cart: bool = True
+) -> float:
+    """
+    Single training step for language model.
+
+    Args:
+        model: Language model
+        batch_input_ids: Input token IDs, shape (batch, seq_len)
+        batch_context_ids: Context token IDs, shape (batch, ctx_len) [only for CART]
+        batch_target_ids: Target token IDs, shape (batch, seq_len)
+        optimizer: Optimizer
+        loss_fn: Loss function
+        is_cart: Whether model is CART (True) or standard transformer (False)
+
+    Returns:
+        Loss value
+    """
+    optimizer.zero_grad()
+
+    # Forward pass
+    if is_cart:
+        logits = model(batch_input_ids, batch_context_ids)
+    else:
+        logits = model(batch_input_ids)
+
+    # Reshape for loss
+    logits_flat = logits.reshape(-1, logits.shape[-1])
+    targets_flat = batch_target_ids.reshape(-1)
+
+    # Compute loss
+    loss = loss_fn(logits_flat, targets_flat)
+
+    # Backward pass
+    loss.backward()
+    optimizer.step()
+
+    return loss.item()
+
+
+def evaluate_lm(
+    model: nn.Module,
+    input_ids: torch.Tensor,
+    context_ids: torch.Tensor,
+    target_ids: torch.Tensor,
+    batch_size: int = 32,
+    is_cart: bool = True
+) -> float:
+    """
+    Evaluate language model on a dataset.
+
+    Args:
+        model: Language model
+        input_ids: Input token IDs, shape (num_samples, seq_len)
+        context_ids: Context token IDs, shape (num_samples, ctx_len) [only for CART]
+        target_ids: Target token IDs, shape (num_samples, seq_len)
+        batch_size: Batch size for evaluation
+        is_cart: Whether model is CART (True) or standard transformer (False)
+
+    Returns:
+        Average loss
+    """
+    model.eval()
+    loss_fn = nn.CrossEntropyLoss()
+
+    total_loss = 0.0
+    total_samples = 0
+
+    with torch.no_grad():
+        for i in range(0, len(input_ids), batch_size):
+            batch_end = min(i + batch_size, len(input_ids))
+            batch_input = input_ids[i:batch_end]
+            batch_target = target_ids[i:batch_end]
+
+            if is_cart:
+                batch_context = context_ids[i:batch_end]
+                logits = model(batch_input, batch_context)
+            else:
+                logits = model(batch_input)
+
+            logits_flat = logits.reshape(-1, logits.shape[-1])
+            targets_flat = batch_target.reshape(-1)
+
+            loss = loss_fn(logits_flat, targets_flat)
+            total_loss += loss.item() * (batch_end - i)
+            total_samples += batch_end - i
+
+    avg_loss = total_loss / total_samples
+    model.train()
+
+    return avg_loss
