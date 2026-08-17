@@ -36,3 +36,18 @@ Visual AutoRegressive Modeling (VAR) proposes a fundamentally different approach
 - No scale embeddings or cumulative masking (added in pass 2)
 - No training, no loss function, no actual gradient flow yet
 - Generated tokens are random logits, not trained predictions
+
+### Pass 2
+**Implemented:**
+- Full transformer stack: replaced single layer with 6 stacked transformer blocks for deeper modeling
+- Scale embeddings: added learnable embeddings for each scale, concatenated to token representations so the model knows which scale each token belongs to
+- Cumulative scale masking: implemented causal attention mask that enforces coarse-to-fine prediction order. Each token can attend to:
+  - All tokens from coarser scales (earlier scales)
+  - All tokens from its own scale (parallel generation within a scale)
+  - NOT to tokens from finer scales (future scales being predicted)
+- This realizes the core VAR innovation: sequential scale-conditional prediction instead of raster-scan token prediction
+
+**Simplified/stubbed:**
+- Tokenizer remains the same simple convolution-based design (no learned codebook)
+- No actual training yet (pass 3 will add training loop)
+- Inference/generation still stubbed (pass 4 will add sampling)
