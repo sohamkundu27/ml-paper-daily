@@ -51,3 +51,21 @@ Visual AutoRegressive Modeling (VAR) proposes a fundamentally different approach
 - Tokenizer remains the same simple convolution-based design (no learned codebook)
 - No actual training yet (pass 3 will add training loop)
 - Inference/generation still stubbed (pass 4 will add sampling)
+
+### Pass 3
+**Implemented:**
+- VARTrainer class: orchestrates training loop with optimizer (Adam) and learning rate scheduling
+- Cross-entropy loss computation: loss is computed over predicted token logits vs. target token indices across all scales
+- Target token generation: crude quantization scheme that converts continuous token features to discrete indices (simulating a VQ-VAE codebook)
+- Training step: forward pass, loss computation, backward pass, and gradient updates via optimizer
+- Validation loop: computes validation loss without gradient updates
+- ToyImageDataset: synthetic dataset that generates random images for training verification
+- DataLoader integration: supports batched training with PyTorch's DataLoader
+- Comprehensive testing: verified that loss decreases during training, gradients flow correctly, and different learning rates affect convergence speed
+
+**Simplified/stubbed:**
+- Target tokens use a crude hash-based quantization instead of a learned VQ-VAE codebook. Real VAR uses a pre-trained codebook from a discrete VAE
+- Toy dataset is entirely synthetic (random tensors), not real images. In practice, would use ImageNet or similar with a pre-trained tokenizer
+- No learning rate scheduling or other optimizations (uses constant learning rate)
+- No checkpoint saving or resuming
+- Inference/generation still stubbed (pass 4 will add sampling)
