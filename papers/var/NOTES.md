@@ -69,3 +69,39 @@ Visual AutoRegressive Modeling (VAR) proposes a fundamentally different approach
 - No learning rate scheduling or other optimizations (uses constant learning rate)
 - No checkpoint saving or resuming
 - Inference/generation still stubbed (pass 4 will add sampling)
+
+### Pass 4
+**Implemented:**
+- VARGenerator class: coarse-to-fine sampling that generates token sequences scale-by-scale
+- Sampling mechanism: for each scale, predicts token logits conditioned on all coarser scales, then samples from predicted distribution
+- Temperature parameter: controls sampling diversity (low = deterministic, high = random)
+- Batch generation: supports generating multiple samples in parallel
+- VARPass4 wrapper: combines training (Pass 3) and generation into unified model interface
+- End-to-end pipeline: demonstrated full train-then-generate workflow on toy data
+- Scale-aware generation: properly constructs attention masks to enforce coarse-to-fine dependency during generation
+- Comprehensive testing: verified generation produces valid token sequences, respects temperature, handles variable batch sizes, and works end-to-end
+
+**Simplified/stubbed:**
+- Token embeddings during generation use crude initialization (small random + token value signal) instead of learned embeddings. Real VAR would use a learned codebook
+- Generated tokens are not converted back to spatial token maps or reconstructed images. Full pipeline would reconstruct using a learned decoder
+- Generation uses forward-pass logits directly; no beam search or other advanced decoding strategies
+- No generation-time optimization (no training inference mode, no caching of attention states)
+- Model has not been trained on real image data; all tests use synthetic random images
+
+## Summary
+
+The VAR implementation across 4 passes builds a complete pipeline:
+1. **Pass 1**: Hierarchical image tokenization and single-layer transformer
+2. **Pass 2**: Multi-layer transformer with scale-aware attention masking (core innovation)
+3. **Pass 3**: Training loop demonstrating the model learns coarse-to-fine structure
+4. **Pass 4**: Inference and generation showing the model can sample coherent hierarchies
+
+Key differences from the real VAR paper:
+- Uses simple convolutional tokenizer instead of learned VQ-VAE
+- Training targets are crudely quantized instead of using a pre-trained codebook
+- Generation does not reconstruct to images (only generates token sequences)
+- Trained on toy/synthetic data, not ImageNet or similar large datasets
+- Simplified decoder (no actual image reconstruction)
+- Smaller model size and fewer layers for faster execution
+
+Despite simplifications, the implementation captures the core VAR insight: sequential scale-to-fine token prediction with proper attention masking enables natural hierarchical structure without raster-scan ordering.
