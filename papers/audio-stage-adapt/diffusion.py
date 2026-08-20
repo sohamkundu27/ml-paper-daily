@@ -26,27 +26,38 @@ class SinusoidalPosEmbed(nn.Module):
 
 
 class AudioDiffusionModel(nn.Module):
-    def __init__(self, audio_dim=128, time_dim=64, hidden_dim=256):
+    def __init__(self, audio_dim=128, time_dim=64, hidden_dim=256, cond_dim=None):
         super().__init__()
         self.audio_dim = audio_dim
         self.time_dim = time_dim
+        self.cond_dim = cond_dim
 
         self.time_embed = SinusoidalPosEmbed(time_dim)
 
+        # Input size: audio + time + optional conditioning
+        input_size = audio_dim + time_dim
+        if cond_dim is not None:
+            input_size += cond_dim
+
         # Simple MLP-based denoising network
         self.net = nn.Sequential(
-            nn.Linear(audio_dim + time_dim, hidden_dim),
+            nn.Linear(input_size, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, audio_dim),
         )
 
-    def forward(self, x, t):
+    def forward(self, x, t, cond=None):
         # x: (batch_size, audio_dim)
         # t: (batch_size,) or scalar, timestep in [0, 1]
+        # cond: (batch_size, cond_dim) optional conditioning vector
         t_emb = self.time_embed(t)
         x_concat = torch.cat([x, t_emb], dim=-1)
+
+        if cond is not None:
+            x_concat = torch.cat([x_concat, cond], dim=-1)
+
         return self.net(x_concat)
 
 
@@ -88,8 +99,9 @@ class GaussianDiffusion:
 
         return sqrt_alpha * x0 + sqrt_one_minus_alpha * noise
 
-    def sample(self, model, shape, device, num_steps=None):
+    def sample(self, model, shape, device, num_steps=None, cond=None):
         # Reverse diffusion: denoise from noise to sample
+        # cond: optional conditioning vector of shape (batch_size, cond_dim)
         if num_steps is None:
             num_steps = self.timesteps
 
@@ -105,8 +117,8 @@ class GaussianDiffusion:
                 t = torch.full((shape[0],), t_idx, dtype=torch.long, device=device)
                 t_norm = t.float() / self.timesteps  # Normalize to [0, 1]
 
-                # Predict noise
-                noise_pred = model(x, t_norm)
+                # Predict noise (with optional conditioning)
+                noise_pred = model(x, t_norm, cond=cond)
 
                 # Reverse step (simplified)
                 alpha = self.alphas[t_idx]
@@ -226,3 +238,38 @@ def stage_adaptive_loss(noise_pred, target_noise, t, scheduler, current_step):
     total_loss = semantic_w * semantic_loss + perceptual_w * perceptual_loss
 
     return total_loss
+
+
+def make_class_embedding(class_id, num_classes, cond_dim=32, device='cpu'):
+    """Create a learnable class embedding for conditioning.
+
+    Args:
+        class_id: integer class index or tensor of shape (batch_size,)
+        num_classes: total number of classes
+        cond_dim: embedding dimension
+        device: torch device
+
+    Returns:
+        embedding: one-hot encoding expanded to cond_dim via random projection
+    """
+    if isinstance(class_id, int):
+        class_id = torch.tensor([class_id], device=device)
+    elif isinstance(class_id, torch.Tensor):
+        if class_id.device != device:
+            class_id = class_id.to(device)
+    else:
+        class_id = torch.tensor(class_id, device=device)
+
+    batch_size = class_id.shape[0]
+
+    # One-hot encoding
+    one_hot = torch.zeros(batch_size, num_classes, device=device)
+    one_hot.scatter_(1, class_id.view(-1, 1), 1.0)
+
+    # Expand one-hot to cond_dim with fixed random projection
+    # (ensures consistency across runs)
+    torch.manual_seed(0)
+    proj = torch.randn(num_classes, cond_dim, device=device) / math.sqrt(num_classes)
+
+    embedding = torch.mm(one_hot, proj)  # (batch_size, cond_dim)
+    return embedding

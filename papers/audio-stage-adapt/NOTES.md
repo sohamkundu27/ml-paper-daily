@@ -84,3 +84,44 @@ The paper addresses the computational inefficiency of training audio diffusion m
 - Stage weighting assumes all high-noise timesteps are "semantic" and all low-noise are "perceptual"
   - Real implementation might weight more flexibly based on frequency content
 - No integration with conditioning yet (Pass 3 will add conditioning)
+
+### Pass 3 Implementation
+
+**What works:**
+- Conditional AudioDiffusionModel: extended to accept optional conditioning vector via cond parameter
+  - Model concatenates conditioning to audio+time embeddings before MLP
+  - Supports both conditional (cond_dim specified) and unconditional (cond_dim=None) modes
+  - Backward compatible: existing unconditional code works unchanged
+- Class-based conditioning via make_class_embedding function
+  - Converts class indices to one-hot encoding, then projects to cond_dim
+  - Deterministic projection ensures same class produces same embedding
+  - Supports single class or batch of class indices
+- Conditional sampling: diffusion.sample() now accepts cond parameter
+  - Passes conditioning through all reverse diffusion steps
+  - Enables class-conditional generation during inference
+- Full training loop with conditioning:
+  - Stage-adaptive loss works seamlessly with conditional models
+  - Tested on small synthetic data (batch_size=4, audio_dim=128)
+  - Successfully trains class-conditional denoising network
+
+**Test coverage:**
+- Class embedding determinism and shape correctness
+- Conditional model forward pass with and without conditioning
+- Unconditional model backward compatibility
+- Conditional sampling from noise to clean audio
+- Training loop with class conditioning and stage-adaptive loss
+- Class consistency (same class produces deterministic results, different classes differ)
+
+**What was simplified:**
+- No actual text encoder: uses simple class label embeddings via one-hot projection
+  - Real implementation would embed natural language descriptions of audio
+  - Here, we use discrete class indices (0-4 for demo) as conditioning
+- No cross-attention: conditioning is concatenated to input
+  - Real implementation might use cross-attention for more flexible interaction
+  - Concatenation is simpler and works for this scope
+- No classifier-free guidance: unconditional paths not implemented
+  - Real implementation uses guidance scale to control conditioning strength
+  - Omitted to keep scope focused on basic conditioning integration
+- No explicit conditioning during training with different probability (CFG training)
+  - Would randomly drop conditioning during training to improve unconditional performance
+  - Not needed for this demo
