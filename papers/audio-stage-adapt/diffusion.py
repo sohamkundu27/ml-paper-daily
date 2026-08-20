@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+import numpy as np
 
 
 class SinusoidalPosEmbed(nn.Module):
@@ -120,3 +121,108 @@ class GaussianDiffusion:
                     x = x + torch.sqrt(self.betas[t_idx]) * z
 
         return x
+
+
+class StageAdaptiveScheduler:
+    """Adapts loss weights across training stages.
+
+    Early training (semantic stage): focus on coarse structure via high-noise timesteps.
+    Late training (perceptual stage): focus on fine details via low-noise timesteps.
+    """
+    def __init__(self, num_training_steps, timesteps=100, strategy='linear'):
+        self.num_training_steps = num_training_steps
+        self.timesteps = timesteps
+        self.strategy = strategy
+
+    def get_weights(self, current_step):
+        """Return (semantic_weight, perceptual_weight) for current step.
+
+        Args:
+            current_step: current training step in [0, num_training_steps)
+
+        Returns:
+            (semantic_weight, perceptual_weight): weights that sum to 1.0
+        """
+        progress = current_step / max(self.num_training_steps - 1, 1)  # [0, 1]
+
+        if self.strategy == 'linear':
+            semantic_weight = 1.0 - progress
+            perceptual_weight = progress
+        elif self.strategy == 'exponential':
+            semantic_weight = np.exp(-3.0 * progress)
+            semantic_weight = semantic_weight / (semantic_weight + 1.0)
+            perceptual_weight = 1.0 - semantic_weight
+        elif self.strategy == 'cosine':
+            semantic_weight = 0.5 * (1.0 + np.cos(np.pi * progress))
+            perceptual_weight = 0.5 * (1.0 - np.cos(np.pi * progress))
+        else:
+            raise ValueError(f"Unknown strategy: {self.strategy}")
+
+        return semantic_weight, perceptual_weight
+
+    def get_timestep_mask(self, batch_size, sampled_t, device, current_step):
+        """Create masks for semantic vs perceptual timesteps.
+
+        Semantic: focus on high-noise timesteps (t > mid)
+        Perceptual: focus on low-noise timesteps (t < mid)
+
+        Args:
+            batch_size: batch size
+            sampled_t: sampled timesteps, shape (batch_size,)
+            device: torch device
+            current_step: current training step
+
+        Returns:
+            (semantic_mask, perceptual_mask): boolean masks for each objective
+        """
+        semantic_weight, perceptual_weight = self.get_weights(current_step)
+
+        # Midpoint of timestep range
+        mid_t = self.timesteps // 2
+
+        # Semantic loss emphasizes high-noise (large t)
+        semantic_mask = sampled_t >= mid_t
+
+        # Perceptual loss emphasizes low-noise (small t)
+        perceptual_mask = sampled_t < mid_t
+
+        return semantic_mask, perceptual_mask, semantic_weight, perceptual_weight
+
+
+def stage_adaptive_loss(noise_pred, target_noise, t, scheduler, current_step):
+    """Compute stage-adaptive loss with separate semantic and perceptual components.
+
+    Args:
+        noise_pred: predicted noise from model
+        target_noise: ground truth noise
+        t: timesteps for each sample in batch
+        scheduler: StageAdaptiveScheduler instance
+        current_step: current training step
+
+    Returns:
+        loss: weighted sum of semantic and perceptual losses
+    """
+    device = noise_pred.device
+    batch_size = noise_pred.shape[0]
+
+    semantic_mask, perceptual_mask, semantic_w, perceptual_w = scheduler.get_timestep_mask(
+        batch_size, t, device, current_step
+    )
+
+    # Base MSE loss per sample
+    mse_loss = torch.mean((noise_pred - target_noise) ** 2, dim=list(range(1, noise_pred.ndim)))
+
+    # Semantic loss: high-noise timesteps
+    semantic_loss = 0.0
+    if semantic_mask.any():
+        semantic_loss = mse_loss[semantic_mask].mean()
+
+    # Perceptual loss: low-noise timesteps
+    perceptual_loss = 0.0
+    if perceptual_mask.any():
+        perceptual_loss = mse_loss[perceptual_mask].mean()
+
+    # Combine with stage-adaptive weights
+    total_loss = semantic_w * semantic_loss + perceptual_w * perceptual_loss
+
+    return total_loss

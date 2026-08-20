@@ -64,3 +64,23 @@ The paper addresses the computational inefficiency of training audio diffusion m
 - Training step (backward pass works, loss decreases)
 - Sampling produces valid outputs
 - Model determinism in eval mode
+
+### Pass 2 Implementation
+
+**What works:**
+- StageAdaptiveScheduler: computes semantic vs. perceptual loss weights based on training progress
+  - Linear strategy: weights transition linearly from semantic→perceptual over training
+  - Exponential and cosine strategies also available for non-linear transitions
+- get_timestep_mask: partitions timesteps into semantic (high-noise, t > mid) and perceptual (low-noise, t < mid)
+- stage_adaptive_loss: applies adaptive weights to separate loss components
+  - Early training: emphasizes semantic loss (coarse structure learning)
+  - Late training: emphasizes perceptual loss (fine detail refinement)
+- Verified weights change correctly: early steps have semantic_w ≈ 1.0, late steps have perceptual_w ≈ 1.0
+- Compatible with existing training loop: drop-in replacement for MSE loss
+
+**What was simplified:**
+- Timestep partitioning is simple (binary split at midpoint) rather than learned or task-aware
+- No ablation on different strategy curves (linear suffices for demo)
+- Stage weighting assumes all high-noise timesteps are "semantic" and all low-noise are "perceptual"
+  - Real implementation might weight more flexibly based on frequency content
+- No integration with conditioning yet (Pass 3 will add conditioning)
