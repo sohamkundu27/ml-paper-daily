@@ -224,15 +224,18 @@ def stage_adaptive_loss(noise_pred, target_noise, t, scheduler, current_step):
     # Base MSE loss per sample
     mse_loss = torch.mean((noise_pred - target_noise) ** 2, dim=list(range(1, noise_pred.ndim)))
 
-    # Semantic loss: high-noise timesteps
-    semantic_loss = 0.0
+    # Compute semantic and perceptual losses
     if semantic_mask.any():
         semantic_loss = mse_loss[semantic_mask].mean()
+    else:
+        # No semantic samples in this batch; use overall mean as fallback
+        semantic_loss = mse_loss.mean()
 
-    # Perceptual loss: low-noise timesteps
-    perceptual_loss = 0.0
     if perceptual_mask.any():
         perceptual_loss = mse_loss[perceptual_mask].mean()
+    else:
+        # No perceptual samples in this batch; use overall mean as fallback
+        perceptual_loss = mse_loss.mean()
 
     # Combine with stage-adaptive weights
     total_loss = semantic_w * semantic_loss + perceptual_w * perceptual_loss
