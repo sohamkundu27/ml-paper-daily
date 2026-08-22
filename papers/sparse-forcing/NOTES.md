@@ -41,3 +41,37 @@ Integrate sparse forcing into a minimal diffusion model and demonstrate end-to-e
 - No persistent block state updates across multiple frames
 - No actual video generation; purely demonstrates the attention mechanism
 - Single forward pass; no recurrent decoding or KV cache management yet
+
+### Pass 2: Learnable Block Selection
+
+**What is implemented:**
+- `BlockScorer` module: lightweight neural network that learns to score block importance
+  - Takes averaged value features per block as input
+  - Small 2-layer MLP (dim → 64 → 1) produces importance scores
+  - Handles both plain and multi-head value shapes automatically
+- Extended `SparseAttentionMask` to accept dynamic persistent block indices
+- Extended `MultiHeadSparseAttention` with `use_learned_blocks` flag:
+  - When enabled, scorer runs on input, selects top-k blocks via softmax scoring
+  - Dynamically updates mask based on learned scores per forward pass
+  - Maintains compatibility with fixed block selection (backward compatible)
+- Comprehensive test suite for learned blocks:
+  - Basic scorer functionality
+  - Multi-head input handling
+  - Learned attention layer correctness
+  - Per-batch different block selections
+  - Score sensitivity to input changes
+  - Comparison between learned vs fixed blocks
+- Demo script showing:
+  - How block scorer works and visualizes scores
+  - Learned block selection in attention layer
+  - Comparison on synthetic "video" data (4 frames × 16 tokens)
+  - Block scores changing during optimization
+  - Training loop showing learned adaptation
+
+**What is simplified or stubbed:**
+- BlockScorer pools values by averaging per block (could use more sophisticated aggregation)
+- Block selection uses top-k on average scores per batch (deterministic, not sampling)
+- No learned ranking or attention over blocks themselves (each block scored independently)
+- No persistent block state carried across multiple decoding steps yet
+- No end-to-end video generation or downstream task to validate that learned selection is better
+- All block selection at test/demo time is deterministic (could add temperature/sampling)
