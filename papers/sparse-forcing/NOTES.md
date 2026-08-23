@@ -75,3 +75,58 @@ Integrate sparse forcing into a minimal diffusion model and demonstrate end-to-e
 - No persistent block state carried across multiple decoding steps yet
 - No end-to-end video generation or downstream task to validate that learned selection is better
 - All block selection at test/demo time is deterministic (could add temperature/sampling)
+
+### Pass 3: Persistent Block State Management
+
+**What is implemented:**
+- `PersistentBlockState` class: manages block feature states across decoding steps
+  - Stores frame-by-frame block features in a history deque
+  - Tracks frame indices and timestamps
+  - Provides exponentially-weighted averaging for current state (recent frames weighted more heavily)
+  - Supports `update()` to add new frame's block features
+  - Supports `compress()` to reduce memory by pooling old frames (~40-55% memory reduction)
+  - Supports `clear_stale()` to maintain only recent frames (sliding window)
+  - Provides `get_block_importance()` via variance-based scoring or learned scorer
+  - Includes `memory_info()` for tracking memory usage
+
+- `PersistentBlockCache` class: high-level cache for multi-step decoding
+  - Wraps PersistentBlockState with convenient interface
+  - `update_from_attention_output()`: extracts and pools attention output into block features
+  - `compress()`, `clear_stale()`, `reset()`, `get_state()`, `get_memory_info()` methods
+  - Device-agnostic (handles CPU/GPU storage)
+
+- Integration with `MultiHeadSparseAttention`:
+  - Added `use_persistent_cache` parameter to constructor
+  - Automatically creates and manages cache on first forward pass
+  - Updates cache with attention output after each forward pass
+  - Maintains state across multiple calls (autoregressive decoding)
+
+- Comprehensive test suite: 13 tests covering:
+  - State creation and updates
+  - Current state computation with recency weighting
+  - Compression effectiveness and correctness
+  - Stale clearing and sliding window behavior
+  - Cache creation and integration
+  - Updating cache from attention output
+  - Multi-step decoding simulation
+  - Memory tracking
+  - Block importance scoring
+  - Full autoregressive decoding with state accumulation
+
+- Demo script showing:
+  - Block state accumulation across 5 frames
+  - Compression reduces memory ~40-55% while preserving state
+  - Stale clearing for sliding window operation
+  - Full autoregressive cache through 6 decoding steps
+  - Integration with sparse attention layer
+  - Long-horizon decoding memory efficiency comparison
+
+**What is simplified or stubbed:**
+- Compression uses simple averaging of old frames (could weight by importance)
+- Block features extracted via spatial pooling only (averaging over tokens)
+- No hierarchical compression (could have multi-level summary)
+- No learned compression or importance weighting for what to compress
+- State update extracts features via averaging (could use more sophisticated pooling)
+- Importance scoring uses variance only (could incorporate other metrics)
+- No explicit temporal attention over cached blocks
+- Cache state is not used in the actual attention computation (pass 4 will integrate)

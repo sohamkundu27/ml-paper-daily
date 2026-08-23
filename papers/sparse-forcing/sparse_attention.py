@@ -1,6 +1,7 @@
 import torch
 import numpy as np
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Dict
+from collections import deque
 
 
 class BlockScorer(torch.nn.Module):
@@ -144,6 +145,210 @@ class SparseAttentionMask:
         }
 
 
+class PersistentBlockState:
+    """Manages persistent block feature states across decoding steps."""
+
+    def __init__(self, num_blocks: int, feature_dim: int, max_history: int = 4,
+                 device: torch.device = torch.device('cpu')):
+        """
+        Initialize persistent block state manager.
+
+        Args:
+            num_blocks: Number of blocks to track
+            feature_dim: Dimension of block features
+            max_history: Maximum number of past frames to keep before compression
+            device: Device to store state on
+        """
+        self.num_blocks = num_blocks
+        self.feature_dim = feature_dim
+        self.max_history = max_history
+        self.device = device
+
+        # Deque stores (frame_idx, block_features) tuples
+        self.history: deque = deque(maxlen=max_history)
+        self.frame_counter = 0
+
+    def update(self, block_features: torch.Tensor, frame_idx: Optional[int] = None) -> None:
+        """
+        Update state with new block features from a frame.
+
+        Args:
+            block_features: Tensor of shape (num_blocks, feature_dim) or (batch, num_blocks, feature_dim)
+            frame_idx: Optional frame index (auto-incremented if not provided)
+        """
+        if frame_idx is None:
+            frame_idx = self.frame_counter
+            self.frame_counter += 1
+
+        # Ensure 2D: (num_blocks, feature_dim)
+        if block_features.ndim == 3:
+            block_features = block_features.mean(dim=0)  # Average over batch if needed
+
+        assert block_features.shape[0] == self.num_blocks, \
+            f"Expected {self.num_blocks} blocks, got {block_features.shape[0]}"
+        assert block_features.shape[-1] == self.feature_dim, \
+            f"Expected feature_dim {self.feature_dim}, got {block_features.shape[-1]}"
+
+        self.history.append((frame_idx, block_features.detach().cpu()))
+
+    def get_current_state(self) -> torch.Tensor:
+        """
+        Get compressed current block state.
+
+        Returns:
+            Tensor of shape (num_blocks, feature_dim) representing current block features
+        """
+        if len(self.history) == 0:
+            return torch.zeros(self.num_blocks, self.feature_dim, device=self.device)
+
+        # Average features across all historical frames (recency-weighted)
+        frames = [block_feat for _, block_feat in self.history]
+        stacked = torch.stack(frames, dim=0)  # (history_len, num_blocks, feature_dim)
+
+        # Apply exponential weighting: more recent frames have higher weight
+        weights = torch.exp(torch.linspace(-1, 0, len(frames), device=stacked.device))
+        weights = weights / weights.sum()
+        weights = weights.view(-1, 1, 1)  # (history_len, 1, 1)
+
+        weighted_state = (stacked * weights).sum(dim=0)  # (num_blocks, feature_dim)
+        return weighted_state.to(self.device)
+
+    def compress(self, compression_ratio: float = 0.5) -> None:
+        """
+        Compress old state information to reduce memory.
+
+        Args:
+            compression_ratio: Fraction of history to keep (0.5 = keep 50%, remove 50%)
+        """
+        if len(self.history) <= 1:
+            return
+
+        # Compute compressed representation of oldest frames
+        num_to_compress = max(1, int(len(self.history) * (1.0 - compression_ratio)))
+        frames_to_compress = [self.history[i][1] for i in range(num_to_compress)]
+
+        if len(frames_to_compress) > 0:
+            compressed = torch.stack(frames_to_compress, dim=0).mean(dim=0)
+
+            # Remove old frames and add compressed version
+            for _ in range(num_to_compress):
+                self.history.popleft()
+
+            # Re-add as single compressed frame
+            self.history.appendleft((self.frame_counter - num_to_compress, compressed))
+
+    def clear_stale(self, window_size: int = 2) -> None:
+        """
+        Clear stale (very old) information, keeping only recent frames.
+
+        Args:
+            window_size: Number of recent frames to keep
+        """
+        while len(self.history) > window_size:
+            self.history.popleft()
+
+    def get_block_importance(self, block_scorer: Optional[torch.nn.Module] = None) -> torch.Tensor:
+        """
+        Get importance scores for each block based on state variance.
+
+        Args:
+            block_scorer: Optional learned scorer; if None, uses variance-based scoring
+
+        Returns:
+            Tensor of shape (num_blocks,) with importance scores
+        """
+        if len(self.history) == 0:
+            return torch.ones(self.num_blocks)
+
+        frames = torch.stack([block_feat for _, block_feat in self.history], dim=0)
+        variance = frames.var(dim=0).mean(dim=-1)  # Average variance across feature dim
+
+        # Use learned scorer if provided
+        if block_scorer is not None:
+            current_state = self.get_current_state()
+            scores = block_scorer(current_state.unsqueeze(0))
+            return scores.squeeze(0)
+
+        return variance
+
+    def memory_info(self) -> Dict[str, int]:
+        """Get memory usage information."""
+        num_stored_frames = len(self.history)
+        total_params = num_stored_frames * self.num_blocks * self.feature_dim
+        return {
+            'num_frames': num_stored_frames,
+            'total_floats': total_params,
+            'est_memory_mb': total_params * 4 / (1024 * 1024)
+        }
+
+
+class PersistentBlockCache:
+    """Manages persistent block state across multiple autoregressive decoding steps."""
+
+    def __init__(self, num_blocks: int, feature_dim: int, max_history: int = 4,
+                 device: torch.device = torch.device('cpu')):
+        """
+        Initialize persistent block cache.
+
+        Args:
+            num_blocks: Number of blocks
+            feature_dim: Feature dimension
+            max_history: Max frames to keep before compression
+            device: Device to store on
+        """
+        self.state = PersistentBlockState(num_blocks, feature_dim, max_history, device)
+        self.device = device
+
+    def update_from_attention_output(self, attn_output: torch.Tensor, block_size: int) -> None:
+        """
+        Update persistent state from attention layer output by extracting block features.
+
+        Args:
+            attn_output: Attention output of shape (batch, seq_len, dim)
+            block_size: Size of each block (in tokens)
+        """
+        batch_size, seq_len, dim = attn_output.shape
+        num_blocks = (seq_len + block_size - 1) // block_size
+
+        # Pool attention output into blocks
+        block_features = []
+        for block_idx in range(num_blocks):
+            start = block_idx * block_size
+            end = min((block_idx + 1) * block_size, seq_len)
+
+            if start < seq_len:
+                # Average over tokens in block, then over batch
+                block_feat = attn_output[:, start:end, :].mean(dim=1).mean(dim=0)
+            else:
+                block_feat = torch.zeros(dim, device=attn_output.device)
+
+            block_features.append(block_feat)
+
+        block_features = torch.stack(block_features, dim=0)  # (num_blocks, dim)
+        self.state.update(block_features)
+
+    def get_state(self) -> torch.Tensor:
+        """Get current persistent block state."""
+        return self.state.get_current_state().to(self.device)
+
+    def compress(self, ratio: float = 0.5) -> None:
+        """Compress old state information."""
+        self.state.compress(ratio)
+
+    def clear_stale(self, window_size: int = 2) -> None:
+        """Clear stale information."""
+        self.state.clear_stale(window_size)
+
+    def get_memory_info(self) -> Dict[str, int]:
+        """Get memory usage."""
+        return self.state.memory_info()
+
+    def reset(self) -> None:
+        """Reset the cache."""
+        self.state = PersistentBlockState(self.state.num_blocks, self.state.feature_dim,
+                                          self.state.max_history, self.device)
+
+
 def apply_sparse_mask_to_attention(attn_scores: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """
     Apply sparse attention mask to attention scores.
@@ -164,7 +369,7 @@ class MultiHeadSparseAttention(torch.nn.Module):
     """Multi-head attention with sparse attention patterns and learnable block selection."""
 
     def __init__(self, dim: int, num_heads: int, block_size: int, num_persistent_blocks: int,
-                 use_learned_blocks: bool = False):
+                 use_learned_blocks: bool = False, use_persistent_cache: bool = False):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
@@ -178,6 +383,7 @@ class MultiHeadSparseAttention(torch.nn.Module):
         self.block_size = block_size
         self.num_persistent_blocks = num_persistent_blocks
         self.use_learned_blocks = use_learned_blocks
+        self.use_persistent_cache = use_persistent_cache
         self.sparse_mask_gen = None
         self._mask_cache = {}
 
@@ -187,6 +393,13 @@ class MultiHeadSparseAttention(torch.nn.Module):
             self.block_scorer = BlockScorer(dim, num_blocks, hidden_dim=64)
         else:
             self.block_scorer = None
+
+        # Optional persistent block cache
+        if use_persistent_cache:
+            num_blocks = 1  # Will be updated dynamically
+            self.block_cache = None
+        else:
+            self.block_cache = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -202,6 +415,10 @@ class MultiHeadSparseAttention(torch.nn.Module):
 
         # Compute number of blocks
         num_blocks = (seq_len + self.block_size - 1) // self.block_size
+
+        # Initialize persistent block cache if needed
+        if self.use_persistent_cache and self.block_cache is None:
+            self.block_cache = PersistentBlockCache(num_blocks, self.dim, max_history=4, device=x.device)
 
         # Update block scorer if needed
         if self.use_learned_blocks and self.block_scorer.num_blocks != num_blocks:
@@ -264,5 +481,9 @@ class MultiHeadSparseAttention(torch.nn.Module):
         out = out.transpose(1, 2).contiguous()
         out = out.view(batch_size, seq_len, self.dim)
         out = self.out_proj(out)
+
+        # Update persistent block cache if enabled
+        if self.use_persistent_cache:
+            self.block_cache.update_from_attention_output(out, self.block_size)
 
         return out
