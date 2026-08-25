@@ -37,3 +37,47 @@ Demonstrate frame-to-frame prediction on a synthetic video sequence (e.g., a mov
 - Velocity field is not action-conditioned; it is predicted from a simple neural network layer
 - No multi-scale or hierarchical structures
 - Training loop stubbed; only inference implemented
+
+## Implemented vs. simplified (after pass 2)
+
+**Pass 2 implements:**
+- CameraModel: pinhole camera with perspective projection and unprojection
+  - project_3d_to_2d(): 3D → 2D perspective projection
+  - unproject_2d_to_3d(): 2D + depth → 3D lifting
+- SimpleDepthEstimator: CNN that predicts monocular depth from RGB images
+  - Encoder-decoder architecture with upsampling
+  - Outputs depth in configurable range [min_depth, max_depth]
+- SimpleImageFeatureExtractor: CNN that extracts dense feature maps from RGB
+  - Simple 2-layer convolutional backbone
+  - Outputs feature maps at same spatial resolution as input
+- ImageToVoxelProjector: full pipeline to lift 2D images to 3D voxel grid
+  - Extracts 2D features from image
+  - Estimates or uses provided depth map
+  - Lifts pixels to 3D using camera model
+  - Projects 3D features into voxel grid via feature accumulation
+  - Handles multiple pixels projecting to same voxel (average pooling)
+- VoxelToImageUnprojector: reverse pipeline for visualization
+  - Projects voxel grid back to 2D image space
+  - Handles occlusions and multiple voxels per pixel
+- Comprehensive test suite covering:
+  - Camera model round-trip projection/unprojection
+  - Depth estimation and feature extraction
+  - Full lifting pipeline (image → voxel → image)
+  - Spatially-varying depth maps
+- Demo scripts showing end-to-end lifting
+
+**Pass 2 simplifies/stubs:**
+- Depth estimator is a simple 4-layer CNN, not a pre-trained V-JEPA or MiDaS model
+- Feature extractor is a simple 2-layer CNN, not V-JEPA features
+  - Could be replaced with pre-trained V-JEPA features for better quality
+- Camera intrinsics are fixed (no per-image or learnable intrinsics)
+- No handling of camera extrinsics/poses (assumes fixed camera-to-world transform)
+- Voxel coordinate mapping uses simple normalization (no learned warping fields)
+- Feature projection uses simple averaging, not learned composition operators
+- No uncertainty estimation or confidence maps
+- Training loop still stubbed; only inference tested
+
+## Next steps (for pass 3):
+- Action-conditioned flow prediction
+- Self-supervised training on toy video sequences
+- Integration of advection with action conditioning
