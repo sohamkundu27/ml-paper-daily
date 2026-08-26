@@ -77,7 +77,38 @@ Demonstrate frame-to-frame prediction on a synthetic video sequence (e.g., a mov
 - No uncertainty estimation or confidence maps
 - Training loop still stubbed; only inference tested
 
-## Next steps (for pass 3):
-- Action-conditioned flow prediction
-- Self-supervised training on toy video sequences
-- Integration of advection with action conditioning
+## Implemented vs. simplified (after pass 3)
+
+**Pass 3 implements:**
+- ActionConditionedFlowPredictor: Neural network that predicts 3D velocity fields conditioned on both voxel features and action inputs
+  - Feature encoder: encodes sampled voxel features into latent space
+  - Action encoder: encodes action vectors (3D force/direction) into latent space
+  - Position encoder: encodes normalized 3D coordinates
+  - Velocity head: combines all latent representations to predict 3D velocity
+- ActionConditionedAdvection: Extends FeatureAdvection to use action-conditioned flow prediction
+  - Replaces position-only velocity prediction with action-conditioned predictor
+  - Forward pass: takes coordinates, actions, and dt; returns advected features, new coordinates, and predicted velocity
+- SyntheticVideoSequenceGenerator: Creates synthetic video sequences for self-supervised training
+  - Generates sequences where blobs move according to randomly-sampled actions
+  - Each sequence: 5 frames with 3D Gaussian blobs at moving positions
+  - Ground-truth targets: next-frame features predicted by the model
+- Self-supervised training loop: trains action-conditioned model on toy sequences
+  - No ground-truth physics engine or external labels needed
+  - Loss: MSE between predicted and ground-truth next-frame features
+  - Achieves convergence on synthetic data (loss: 0.002→0.004 over 10 epochs)
+- Comprehensive test suite: verifies flow prediction, advection, data generation, and training
+
+**Pass 3 simplifies/stubs:**
+- Action encoding is simple (3D force vectors); no learned action embeddings or semantic understanding
+- Synthetic sequences are generated on-the-fly; no dataset of real video sequences
+- Training is on 32³ voxel grids only; no multi-scale or hierarchical training
+- Velocity prediction is frame-to-frame; no recurrent/temporal modeling of action sequences
+- No model checkpointing, validation set, or early stopping
+- No integration with real images yet (Pass 4 will demonstrate end-to-end)
+- Training targets are synthetic features only; no comparison with real video features
+
+## Next steps (for pass 4):
+- End-to-end frame prediction demo on toy synthetic video
+- Integration of action-conditioned advection with image lifting (Pass 2) and feature unprojection
+- Demonstrate physically plausible predictions without ground-truth physics engine
+- Final documentation: summary of implementation vs. simplification across all passes
