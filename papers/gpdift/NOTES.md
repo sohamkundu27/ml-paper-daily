@@ -61,3 +61,16 @@ GPDiT unifies autoregressive and diffusion modeling by autoregressively predicti
 - Linear attention implemented sequentially (loop over positions) rather than matrix form; not optimized for speed
 - Rotation embedding applied post-projection rather than truly RoPE-style (which would rotate during attention computation)
 - No actual performance benchmarks; focus on correctness and functionality
+
+**Pass 3 implemented:**
+- **SequenceContextDenoisingModel**: Extends denoising to handle frame sequences. Takes a sequence of context frames plus the current noisy frame, projects all to embedding space, concatenates them, applies transformer with causal attention (ensuring current frame can only see previous frames), and predicts noise for the current frame.
+- **AutoregressiveFramePredictor**: Orchestrates autoregressive video generation. Implements `predict_next_frame()` which starts from noise and iteratively denoises using the sequence context model; implements `generate_sequence()` which autoregressively generates a full sequence by repeatedly predicting the next frame and maintaining a sliding context window of the last N frames.
+- **Multi-frame context window**: Configurable context length (default 4) that limits how many previous frames condition each prediction, making it efficient and bounded.
+- **Latent trajectory inference**: Can initialize prediction from single or multiple frames and generate extended sequences, useful for trajectory prediction and video extrapolation.
+- Comprehensive test suite (test_pass3.py) verifying: sequence context denoising with standard and optimized attention, autoregressive prediction with both model types, sequence generation from single and multiple initial frames, variable context lengths, and integration with the encoder.
+
+**Pass 3 simplified/skipped:**
+- Denoising step uses simplified formula (z_t = (z_t - noise_pred) / alpha) rather than full reverse diffusion process with variance schedule
+- No actual video data; all testing on random latent tensors
+- Context frames are simply concatenated (no learned fusion or attention weighting between context and current frame)
+- Autoregressive generation is single-sample (no parallel batch-level optimizations)

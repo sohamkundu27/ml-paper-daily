@@ -372,3 +372,180 @@ class DenoisingModel(nn.Module):
         x = x.squeeze(1)  # (batch, d_model)
         noise_pred = self.out_proj(x)  # (batch, latent_dim)
         return noise_pred
+
+
+class SequenceContextDenoisingModel(nn.Module):
+    """Denoising model that conditions on a sequence of previous frames."""
+
+    def __init__(self, latent_dim=256, d_model=256, num_heads=8, num_blocks=1, use_linear_attn=False, use_rotation_time=False):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.d_model = d_model
+        self.use_rotation_time = use_rotation_time
+
+        # Project latent frames to embedding space
+        self.latent_proj = nn.Linear(latent_dim, d_model)
+
+        # Time embedding
+        if use_rotation_time:
+            self.time_emb = RotationTimeEmbedding(d_model)
+        else:
+            self.time_emb = nn.Sequential(
+                nn.Linear(1, d_model),
+                nn.ReLU(),
+                nn.Linear(d_model, d_model),
+            )
+
+        # Transformer blocks with optional linear attention
+        self.blocks = nn.ModuleList()
+        for _ in range(num_blocks):
+            if use_linear_attn:
+                attn = LinearCausalAttention(d_model, num_heads)
+            else:
+                attn = CausalSelfAttention(d_model, num_heads)
+
+            norm1 = nn.LayerNorm(d_model)
+            norm2 = nn.LayerNorm(d_model)
+            mlp = nn.Sequential(
+                nn.Linear(d_model, 4 * d_model),
+                nn.ReLU(),
+                nn.Linear(4 * d_model, d_model),
+            )
+
+            block = nn.ModuleDict({
+                'attn': attn,
+                'norm1': norm1,
+                'norm2': norm2,
+                'mlp': mlp,
+            })
+            self.blocks.append(block)
+
+        # Output projection (only for the current frame)
+        self.out_proj = nn.Linear(d_model, latent_dim)
+
+    def forward(self, z_context, z_t, t):
+        """
+        Predict noise for z_t given context of previous frames.
+
+        z_context: (batch, context_len, latent_dim) - sequence of previous frames
+        z_t: (batch, latent_dim) - current noisy frame
+        t: (batch,) - timestep
+        """
+        # Project all frames to embedding space
+        z_context_proj = self.latent_proj(z_context)  # (batch, context_len, d_model)
+        z_t_proj = self.latent_proj(z_t.unsqueeze(1))  # (batch, 1, d_model)
+
+        # Concatenate context and current frame: [z_1, z_2, ..., z_{t-1}, z_t]
+        x = torch.cat([z_context_proj, z_t_proj], dim=1)  # (batch, context_len + 1, d_model)
+        batch_size, seq_len, _ = x.shape
+
+        # Time embedding (same for all frames in the sequence)
+        if self.use_rotation_time:
+            # Apply rotation to initial embeddings, then broadcast to sequence
+            t_emb_base = self.time_emb.apply_rotation(torch.randn_like(x[:, 0, :]), t)  # (batch, d_model)
+            t_emb = t_emb_base.unsqueeze(1).expand(batch_size, seq_len, self.d_model)
+        else:
+            t_norm = t.float().unsqueeze(-1) / 1000.0
+            t_emb = self.time_emb(t_norm)  # (batch, d_model)
+            t_emb = t_emb.unsqueeze(1).expand(batch_size, seq_len, self.d_model)
+
+        # Add time embedding to all frames
+        x = x + t_emb
+
+        # Process through transformer blocks with causal masking
+        for block in self.blocks:
+            x = x + block['attn'](block['norm1'](x), causal_mask=True)
+            x = x + block['mlp'](block['norm2'](x))
+
+        # Extract and project the last frame's embedding (current frame prediction)
+        x_last = x[:, -1, :]  # (batch, d_model)
+        noise_pred = self.out_proj(x_last)  # (batch, latent_dim)
+        return noise_pred
+
+
+class AutoregressiveFramePredictor(nn.Module):
+    """Autoregressive frame sequence generation using diffusion."""
+
+    def __init__(self, denoising_model, scheduler, latent_dim, context_len=4, num_denoise_steps=10):
+        super().__init__()
+        self.denoising_model = denoising_model
+        self.scheduler = scheduler
+        self.latent_dim = latent_dim
+        self.context_len = context_len
+        self.num_denoise_steps = num_denoise_steps
+
+    def predict_next_frame(self, z_context, t_start=None):
+        """
+        Predict the next frame given a sequence of context frames.
+
+        z_context: (batch, context_len, latent_dim) - previous frames
+        t_start: int - starting denoising timestep (if None, use num_denoise_steps)
+
+        Returns: (batch, latent_dim) - predicted next frame
+        """
+        if t_start is None:
+            t_start = self.num_denoise_steps
+
+        batch_size = z_context.shape[0]
+        device = z_context.device
+
+        # Start with pure noise
+        z_t = torch.randn(batch_size, self.latent_dim, device=device)
+
+        # Iteratively denoise
+        for step in range(t_start, 0, -1):
+            t = torch.full((batch_size,), step - 1, dtype=torch.long, device=device)
+
+            with torch.no_grad():
+                # Predict noise using denoising model
+                if isinstance(self.denoising_model, SequenceContextDenoisingModel):
+                    noise_pred = self.denoising_model(z_context, z_t, t)
+                else:
+                    # Fallback for standard DenoisingModel
+                    noise_pred = self.denoising_model(z_t, t)
+
+                # Simplified denoising step: z_t = (z_t - noise_pred) / alpha
+                # This is a simplified version of the reverse diffusion process
+                alpha = self.scheduler.sqrt_alphas_cumprod[t[0]].item()
+                if alpha > 1e-8:
+                    z_t = (z_t - noise_pred * (1 - alpha)) / (alpha + 1e-8)
+                else:
+                    z_t = -noise_pred
+
+        return z_t
+
+    def generate_sequence(self, z_init, num_frames):
+        """
+        Generate a sequence of frames autoregressively.
+
+        z_init: (batch, latent_dim) or (batch, init_len, latent_dim) - initial frame(s)
+        num_frames: int - total number of frames to generate
+
+        Returns: (batch, num_frames, latent_dim) - generated sequence
+        """
+        device = z_init.device
+        batch_size = z_init.shape[0]
+
+        # Handle initialization
+        if z_init.dim() == 2:
+            # Single frame: (batch, latent_dim)
+            z_init = z_init.unsqueeze(1)  # (batch, 1, latent_dim)
+
+        init_len = z_init.shape[1]
+        sequence = [z_init]  # List of (batch, 1, latent_dim)
+
+        # Generate remaining frames
+        for _ in range(num_frames - init_len):
+            # Get context: use last context_len frames or all frames if fewer
+            context_frames = sequence[-self.context_len:]  # List of (batch, 1, latent_dim)
+            z_context = torch.cat(context_frames, dim=1)  # (batch, ctx_len, latent_dim)
+
+            # Predict next frame
+            z_next = self.predict_next_frame(z_context)
+
+            # Add to sequence
+            sequence.append(z_next.unsqueeze(1))
+
+        # Concatenate all frames
+        z_sequence = torch.cat(sequence, dim=1)  # (batch, num_frames, latent_dim)
+        return z_sequence
