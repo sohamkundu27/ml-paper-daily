@@ -49,3 +49,15 @@ GPDiT unifies autoregressive and diffusion modeling by autoregressively predicti
 - Single-frame prediction only (no multi-frame sequence yet)
 - No pre-training or fine-tuning
 - No video data; test only on synthetic tensors
+
+**Pass 2 implemented:**
+- **Linear causal attention**: Efficient kernel-based attention using ELU+1 kernel. Computes attention as O = (Q_ker @ K_ker^T @ V) / (Q_ker @ K_ker^T @ 1), with sequential causal masking to reduce quadratic complexity. Works with variable-length sequences.
+- **Rotation-based time embedding**: Parameter-free time conditioning using 2D rotation matrices applied element-wise based on timestep. Preserves norm and naturally encodes continuous time information without learnable parameters.
+- Updated DenoisingModel to support both linear attention and rotation time embedding via optional flags (use_linear_attn, use_rotation_time).
+- Updated TransformerBlock to support linear causal attention.
+- Comprehensive test suite (test_pass2.py) verifying: rotation properties (norm preservation), linear attention on variable-length sequences, both components individually and combined, backward compatibility, and training with new components.
+
+**Pass 2 simplified/skipped:**
+- Linear attention implemented sequentially (loop over positions) rather than matrix form; not optimized for speed
+- Rotation embedding applied post-projection rather than truly RoPE-style (which would rotate during attention computation)
+- No actual performance benchmarks; focus on correctness and functionality
