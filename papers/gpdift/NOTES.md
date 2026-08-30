@@ -74,3 +74,38 @@ GPDiT unifies autoregressive and diffusion modeling by autoregressively predicti
 - No actual video data; all testing on random latent tensors
 - Context frames are simply concatenated (no learned fusion or attention weighting between context and current frame)
 - Autoregressive generation is single-sample (no parallel batch-level optimizations)
+
+**Pass 4 implemented:**
+- **Synthetic video generation**: Helper function `create_synthetic_video()` generates simple toy videos with moving patterns (dot, circle, wave) for testing without real data
+- **End-to-end pipeline demo**: Full integration test that encodes initial frames to latent space, uses AutoregressiveFramePredictor to generate future frames, and decodes predictions back to pixel space
+- **Pattern-based testing**: Tests video generation with multiple synthetic patterns (moving dot, expanding circle, traveling wave) to verify robustness
+- **Component variant testing**: Comprehensive tests combining different model configurations (linear attention, rotation time embedding, multiple blocks)
+- **Sequence smoothness verification**: Validates that generated latent frame sequences have bounded differences and do not contain numerical artifacts
+- **Batch processing**: Tests multi-sample generation (batch_size > 1) to verify batch dimension handling
+- **Context propagation**: Verifies that varying context window lengths (1, 2, 4 frames) all work correctly and influence predictions
+
+**Pass 4 simplified/skipped:**
+- No actual video dataset; all demos use synthetic patterns
+- Synthetic videos are simple geometric patterns (no learned or natural motion)
+- No visualization/image saving (all tests verify correctness via assertions)
+- No quantitative metrics (SSIM, LPIPS, FVD); just verifies numerical stability and shape correctness
+- Denoising still uses simplified reverse process (not full variance-preserving)
+- No training step in Pass 4 (all models used in eval mode with frozen weights)
+- Latent space remains untrained projection (no learned compression like real VAE)
+
+## Summary: What was implemented vs. simplified
+
+**Implemented across all passes:**
+1. **Diffusion foundation (Pass 1)**: Linear noise schedule, forward/reverse diffusion process, basic denoising model, simple VAE-like latent codec
+2. **Efficient components (Pass 2)**: Linear causal attention (O(n) with kernel methods), parameter-free rotation-based time embedding (RoPE-style), verified causality
+3. **Autoregressive generation (Pass 3)**: Frame sequence denoising with context conditioning, autoregressive prediction loop, multi-frame sliding window context
+4. **End-to-end pipeline (Pass 4)**: Synthetic video generation, full encoding→generation→decoding demo, robust testing across patterns and configurations
+
+**Unified simplifications across all passes:**
+- Uses toy/random data, not real video
+- Linear causal attention implemented sequentially (loop-based) rather than as fused kernel
+- Rotation time embedding applied post-projection rather than as RoPE during attention
+- Simplified denoising reverse step (not full reverse diffusion with variance schedule)
+- No learned VAE; latent codec is random projection
+- No pre-training or fine-tuning; all components use random initialization
+- No quantitative evaluation metrics (visual/numerical quality not measured)
