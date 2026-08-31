@@ -46,3 +46,29 @@ This paper addresses the quadratic complexity bottleneck in transformer self-att
 - No end-to-end efficiency measurement or wall-clock speedup benchmarks yet.
 - Rules are English-only; no multilingual or language-specific variants.
 - No positional biasing or learnable rule weighting (rules are static).
+
+### Pass 2 Implementation
+
+**Core Components:**
+- `transformer_attention.py`: Full multi-head attention layer with sparse masking support.
+- **SparseMultiHeadAttention:** Drop-in replacement for standard transformer attention that accepts optional POS tags and applies grammatical masks.
+- **Mask Integration:** Both hard and soft masks integrated into scaled dot-product attention computation.
+  - Hard masks: Applied as additive mask (0 → -inf) in logits before softmax to completely block disallowed attention.
+  - Soft masks: Applied as multiplicative weights on attention scores to bias (but not block) non-grammatical pairs.
+- **FLOP Estimation:** `count_sparse_flops()` function to measure computational savings (shows ~47% reduction on a 12-token realistic sequence with 47% sparsity).
+
+**Testing:**
+- 9 comprehensive tests verifying:
+  - Correct output shapes with and without masks
+  - Hard and soft mask application and effectiveness
+  - Gradient flow for backpropagation
+  - FLOP counting and computational savings
+  - Dense vs. sparse and hard vs. soft differences
+- All tests pass with batch processing support and both dense and sparse configurations.
+
+**What is stubbed/simplified:**
+- No actual POS tagging; still uses manually provided sequences (NLTK integration deferred to pass 3).
+- No wall-clock runtime benchmarks; only theoretical FLOP counting for now.
+- Gradient accumulation and mixed-precision training not tested.
+- Only single-sequence batching tested; large-batch behavior not optimized.
+- No layer normalization or feed-forward integration; pure attention layer only.
