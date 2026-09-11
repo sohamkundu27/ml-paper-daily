@@ -50,3 +50,26 @@ Fast3R extends DUSt3R's pairwise approach to multi-view 3D reconstruction by pro
 - **No multi-view consistency**: each pair is predicted independently; Pass 2 will add a Transformer to aggregate across all pairs
 - **No real camera data**: tests use random embeddings and random pose ground truth for validation only
 - **No pose loss or refinement**: just verify shapes and mathematical properties
+
+**Pass 2 — What's implemented:**
+- `PoseRefinementTransformer`: a Transformer encoder module that refines pairwise pose predictions through multi-view aggregation
+  - Encodes initial 6D poses to a learnable feature space via linear projection
+  - Applies multi-head self-attention (default 8 heads) to learn which pose predictions interact
+  - Refines poses through stacked Transformer layers (default 2 layers)
+  - Decodes refined features back to 6D pose space with residual connection to preserve initial pose information
+  - Enables the model to aggregate geometric information across all image pairs and resolve pose ambiguities
+- `Fast3RMultiView`: combines Pass 1 pairwise estimation with Pass 2 Transformer refinement in one end-to-end model
+  - Outputs both initial and refined pose predictions for comparison
+  - Converts refined 6D poses to 3x4 transformation matrices
+- Comprehensive tests for Pass 2:
+  - Single Transformer refinement with varying numbers of pairs
+  - Small multi-view cases (3-5 images)
+  - Gradient flow through the refiner and full pipeline
+  - Numerical stability and orthogonality of refined rotations
+  - Backward pass through the complete model
+
+**Pass 2 — What's simplified or stubbed:**
+- **No pose consistency loss**: Pass 2 only refines poses through learned attention; no explicit transitivity loss (e.g., A→B + B→C ≈ A→C) yet
+- **No edge-based pooling**: attention is applied uniformly across all pairs; no learned weighting by image-pair distance or geometric properties
+- **Translation still stubbed**: poses refined are still 6D rotation-only; full 9D (rotation + translation) refinement is future work
+- **No real data training**: tests use random embeddings and poses; no supervised training on actual camera trajectories
