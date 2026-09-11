@@ -73,3 +73,22 @@ Fast3R extends DUSt3R's pairwise approach to multi-view 3D reconstruction by pro
 - **No edge-based pooling**: attention is applied uniformly across all pairs; no learned weighting by image-pair distance or geometric properties
 - **Translation still stubbed**: poses refined are still 6D rotation-only; full 9D (rotation + translation) refinement is future work
 - **No real data training**: tests use random embeddings and poses; no supervised training on actual camera trajectories
+
+**Pass 3 — What's implemented:**
+- `compose_poses_matrices()`: Function to compose two relative pose transformations by chaining 3×4 transformation matrices (R1 @ R2 for rotation, R1 @ t2 + t1 for translation)
+- `pose_consistency_loss()`: Enforces transitivity constraint across all image triplets (i, j, k): if A→B and B→C, then the composed transformation should match A→C. Iterates over all possible triplets and accumulates normalized errors
+- `ICPPoseRefiner`: Simplified ICP-style refinement module that performs gradient-based optimization on pose predictions for num_iterations using SGD to minimize the consistency loss
+- `Fast3RWithConsistency`: Full Pass 1+2+3 pipeline that combines pairwise estimation, Transformer refinement, and consistency-based pose refinement
+- Comprehensive tests demonstrating:
+  - Pose composition correctness (orthogonality and determinant preservation)
+  - Consistency loss computation on various multi-view configurations (3 to 15 images)
+  - ICP refinement convergence with loss decreasing over iterations
+  - Full end-to-end pipeline with gradient flow through Pass 1+2
+  - Large-scale demo on 15-view synthetic case
+
+**Pass 3 — What's simplified or stubbed:**
+- **No full ICP with point correspondences**: we do gradient-based refinement on poses only, not a full Iterative Closest Point algorithm with 3D point matching
+- **No loop closure or global optimization**: consistency is enforced locally per triplet, not globally across all images simultaneously
+- **Translation still stubbed**: optimization still works on 6D rotation-only; full 9D pose refinement (with translation gradients) is future work
+- **No real camera trajectories**: tests use random embeddings and poses; no validation on actual multi-view datasets
+- **Sequential pose pair processing**: consistency loss checks all triplets but doesn't use more sophisticated geometric priors (e.g., image graph structure, distance weighting)
