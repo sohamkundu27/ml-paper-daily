@@ -317,8 +317,9 @@ class ICPPoseRefiner(nn.Module):
             refined_poses_6d: (num_pairs, 6) - refined pose predictions
             consistency_losses: list of losses at each iteration
         """
-        # Enable gradients for optimization
-        refined_poses = poses_6d.clone().detach().requires_grad_(True)
+        # Create a copy and enable gradients for optimization
+        refined_poses = poses_6d.detach().clone()
+        refined_poses.requires_grad = True
         optimizer = torch.optim.SGD([refined_poses], lr=self.learning_rate)
 
         consistency_losses = []
@@ -329,11 +330,12 @@ class ICPPoseRefiner(nn.Module):
             # Compute consistency loss
             loss = pose_consistency_loss(refined_poses, pair_indices, num_images)
 
-            # Backpropagate and update
-            loss.backward()
-            optimizer.step()
+            # Only backpropagate if loss has gradients
+            if loss.requires_grad:
+                loss.backward()
+                optimizer.step()
 
-            consistency_losses.append(loss.item())
+            consistency_losses.append(loss.detach().item())
 
         return refined_poses.detach(), consistency_losses
 
