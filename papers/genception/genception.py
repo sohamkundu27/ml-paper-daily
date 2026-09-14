@@ -120,14 +120,102 @@ class InstructionConditioner(nn.Module):
         return conditioned
 
 
-class GenCeption(nn.Module):
-    """GenCeption: instruction-conditioned vision backbone."""
+class DepthHead(nn.Module):
+    """Decoder head for depth estimation."""
 
-    def __init__(self, vocab_size=1000, embed_dim=128, base_channels=32, num_blocks=3):
+    def __init__(self, in_channels, hidden_channels=64):
+        super().__init__()
+        self.conv1 = ConvBlock(in_channels, hidden_channels)
+        self.conv2 = ConvBlock(hidden_channels, hidden_channels)
+        self.depth_pred = nn.Conv2d(hidden_channels, 1, kernel_size=1)
+
+    def forward(self, features):
+        """
+        Args:
+            features: (batch, in_channels, H, W)
+        Returns:
+            depth: (batch, 1, H, W) depth predictions
+        """
+        x = self.conv1(features)
+        x = self.conv2(x)
+        depth = self.depth_pred(x)
+        return depth
+
+
+class NormalsHead(nn.Module):
+    """Decoder head for surface normals estimation."""
+
+    def __init__(self, in_channels, hidden_channels=64):
+        super().__init__()
+        self.conv1 = ConvBlock(in_channels, hidden_channels)
+        self.conv2 = ConvBlock(hidden_channels, hidden_channels)
+        self.normals_pred = nn.Conv2d(hidden_channels, 3, kernel_size=1)
+
+    def forward(self, features):
+        """
+        Args:
+            features: (batch, in_channels, H, W)
+        Returns:
+            normals: (batch, 3, H, W) surface normal predictions
+        """
+        x = self.conv1(features)
+        x = self.conv2(x)
+        normals = self.normals_pred(x)
+        return normals
+
+
+class SegmentationHead(nn.Module):
+    """Decoder head for semantic segmentation."""
+
+    def __init__(self, in_channels, num_classes=10, hidden_channels=64):
+        super().__init__()
+        self.conv1 = ConvBlock(in_channels, hidden_channels)
+        self.conv2 = ConvBlock(hidden_channels, hidden_channels)
+        self.seg_pred = nn.Conv2d(hidden_channels, num_classes, kernel_size=1)
+
+    def forward(self, features):
+        """
+        Args:
+            features: (batch, in_channels, H, W)
+        Returns:
+            segmentation: (batch, num_classes, H, W) segmentation logits
+        """
+        x = self.conv1(features)
+        x = self.conv2(x)
+        seg = self.seg_pred(x)
+        return seg
+
+
+class TaskSelector(nn.Module):
+    """Selects task based on instruction embedding."""
+
+    def __init__(self, instruction_dim, num_tasks=3):
+        super().__init__()
+        self.num_tasks = num_tasks
+        self.task_projector = nn.Linear(instruction_dim, num_tasks)
+
+    def forward(self, instruction_vec):
+        """
+        Args:
+            instruction_vec: (batch, instruction_dim)
+        Returns:
+            task_logits: (batch, num_tasks) logits for each task
+            task_ids: (batch,) selected task index for each sample
+        """
+        task_logits = self.task_projector(instruction_vec)
+        task_ids = task_logits.argmax(dim=1)
+        return task_logits, task_ids
+
+
+class GenCeption(nn.Module):
+    """GenCeption: instruction-conditioned vision backbone with multi-task heads."""
+
+    def __init__(self, vocab_size=1000, embed_dim=128, base_channels=32, num_blocks=3, num_classes=10):
         super().__init__()
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
         self.base_channels = base_channels
+        self.num_classes = num_classes
 
         self.text_embedding = SimpleTextEmbedding(vocab_size, embed_dim)
         self.image_backbone = SimpleUNetBackbone(in_channels=3,
@@ -135,13 +223,23 @@ class GenCeption(nn.Module):
                                                   num_blocks=num_blocks)
         self.conditioner = InstructionConditioner(base_channels, embed_dim)
 
-    def forward(self, image, token_ids):
+        # Task selection and decoder heads
+        self.task_selector = TaskSelector(embed_dim, num_tasks=3)
+        self.depth_head = DepthHead(base_channels, hidden_channels=64)
+        self.normals_head = NormalsHead(base_channels, hidden_channels=64)
+        self.segmentation_head = SegmentationHead(base_channels, num_classes=num_classes, hidden_channels=64)
+
+        self.task_names = ["depth", "normals", "segmentation"]
+
+    def forward(self, image, token_ids, return_all_tasks=False):
         """
         Args:
             image: (batch, 3, H, W) input image
             token_ids: (batch, seq_len) token indices for instruction
+            return_all_tasks: if True, return dict with all task outputs; if False, return conditioned features
         Returns:
-            features: (batch, base_channels, H, W) instruction-conditioned features
+            If return_all_tasks=False (default): features (batch, base_channels, H, W) for backward compatibility
+            If return_all_tasks=True: dict with task_id, task_logits, depth, normals, segmentation
         """
         # Extract instruction embedding
         instruction_vec = self.text_embedding(token_ids)
@@ -152,4 +250,24 @@ class GenCeption(nn.Module):
         # Condition features on instruction
         conditioned_features = self.conditioner(image_features, instruction_vec)
 
-        return conditioned_features
+        if not return_all_tasks:
+            # Pass 1 backward compatibility: return conditioned features
+            return conditioned_features
+
+        # Pass 2 and beyond: compute task-specific outputs
+        task_logits, task_ids = self.task_selector(instruction_vec)
+
+        # Compute outputs for all tasks
+        depth_out = self.depth_head(conditioned_features)  # (batch, 1, H, W)
+        normals_out = self.normals_head(conditioned_features)  # (batch, 3, H, W)
+        seg_out = self.segmentation_head(conditioned_features)  # (batch, num_classes, H, W)
+
+        output_dict = {
+            "task_id": task_ids,
+            "task_logits": task_logits,
+            "depth": depth_out,
+            "normals": normals_out,
+            "segmentation": seg_out
+        }
+
+        return output_dict

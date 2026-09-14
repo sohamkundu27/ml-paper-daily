@@ -57,3 +57,34 @@ The model takes an image and a natural-language instruction (e.g., "estimate dep
 - Instruction vector has fixed dimensionality regardless of instruction length (mean pooling loses sequential information, but is simple and effective for Pass 1).
 - Conditioning is applied uniformly across all spatial locations (multiplication, not selective attention).
 - Base architecture (num_blocks=3) is very small; real models would be much deeper and wider.
+
+**Pass 2 — What is implemented:**
+- Three task-specific decoder heads:
+  - DepthHead: takes conditioned features and outputs (B, 1, H, W) single-channel depth map
+  - NormalsHead: outputs (B, 3, H, W) RGB surface normals prediction
+  - SegmentationHead: outputs (B, num_classes, H, W) semantic segmentation logits
+- TaskSelector module: embeds instruction vector into 3-way task logits, selects task via argmax (depth, normals, or segmentation)
+- Modified GenCeption.forward() to support multi-task decoding:
+  - return_all_tasks=False (default): returns conditioned features for backward compatibility with Pass 1 tests
+  - return_all_tasks=True: returns dictionary with task_id, task_logits, depth, normals, segmentation outputs
+- All decoder heads use simple 2-layer ConvBlock architecture (conv → conv → final projection)
+- Comprehensive test suite verifying: individual head output shapes, task selection mechanism, multi-task output correctness, task selection variation across instructions, deterministic outputs in eval mode
+
+**Simplified/stubbed for Pass 2:**
+- Task selection is purely learned from instruction embeddings via a simple linear projection to 3 logits. Real implementation might use:
+  - Semantic understanding of task keywords ("depth", "normal", "segment")
+  - Hierarchical task grouping or soft task mixing
+  - Learned task routing with mixture-of-experts
+- Decoder heads are minimal (only 2 conv blocks). Real implementation would use:
+  - Skip connections from intermediate backbone features
+  - Progressive upsampling with larger feature maps
+  - Task-specific architectural innovations (e.g., disentangled depth decoders, normal estimation via orientation regression)
+- No task-specific loss functions or training. All heads trained equally in forward pass; no actual gradient updates demonstrated.
+- No cross-task feature sharing or task-agnostic refinement (that's Pass 3).
+- Synthetic test data only; no real image, instruction, or task label data.
+
+**Key assumptions for Pass 2:**
+- Task is fully determined by instruction (hard routing, not soft mixing of multiple tasks).
+- All tasks share the same conditioned feature representation (no task-specific feature extraction).
+- Segmentation uses num_classes=10 fixed; real segmentation would vary by dataset.
+- Decoder depth and width (64 hidden channels) is fixed and small; larger models would use task-specific depths.
