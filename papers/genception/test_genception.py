@@ -1,8 +1,11 @@
 import torch
 from genception import (
     GenCeption, SimpleTextEmbedding, SimpleUNetBackbone, InstructionConditioner,
-    DepthHead, NormalsHead, SegmentationHead, TaskSelector
+    DepthHead, NormalsHead, SegmentationHead, TaskSelector, TaskAgnosticRefiner,
+    SyntheticGenCeptionDataset, train_genception_step
 )
+from torch.utils.data import DataLoader
+import torch.optim as optim
 
 
 def test_text_embedding():
@@ -314,6 +317,168 @@ def test_genception_determinism_pass2():
     print("✓ GenCeption Pass 2 outputs are deterministic in eval mode")
 
 
+def test_task_agnostic_refiner():
+    """Test that task-agnostic refiner produces correct output shapes."""
+    batch_size = 2
+    feature_channels = 32
+    height, width = 64, 64
+    refinement_blocks = 2
+
+    refiner = TaskAgnosticRefiner(feature_channels, refinement_blocks=refinement_blocks)
+
+    features = torch.randn(batch_size, feature_channels, height, width)
+    refined = refiner(features)
+
+    assert refined.shape == features.shape, \
+        f"Expected refined shape {features.shape}, got {refined.shape}"
+    print("✓ Task-agnostic refiner output shape is correct")
+
+    # Verify that refinement modifies features
+    assert not torch.allclose(refined, features), \
+        "Refined features should differ from input features"
+    print("✓ Task-agnostic refiner modifies features")
+
+
+def test_genception_with_refiner():
+    """Test that GenCeption works correctly with the refiner."""
+    batch_size = 2
+    height, width = 64, 64
+    vocab_size = 200
+    embed_dim = 128
+    base_channels = 16
+    num_classes = 10
+    refinement_blocks = 2
+
+    model = GenCeption(vocab_size=vocab_size, embed_dim=embed_dim,
+                       base_channels=base_channels, num_blocks=3,
+                       num_classes=num_classes, refinement_blocks=refinement_blocks)
+    model.eval()
+
+    image = torch.randn(batch_size, 3, height, width)
+    token_ids = torch.randint(0, vocab_size, (batch_size, 10))
+
+    with torch.no_grad():
+        # Test backward compatibility mode
+        features = model(image, token_ids, return_all_tasks=False)
+        assert features.shape == (batch_size, base_channels, height, width), \
+            f"Expected {(batch_size, base_channels, height, width)}, got {features.shape}"
+
+        # Test multi-task mode
+        output_dict = model(image, token_ids, return_all_tasks=True)
+        assert output_dict["depth"].shape == (batch_size, 1, height, width)
+        assert output_dict["normals"].shape == (batch_size, 3, height, width)
+        assert output_dict["segmentation"].shape == (batch_size, num_classes, height, width)
+
+    print("✓ GenCeption with refiner produces correct shapes")
+
+
+def test_synthetic_dataset():
+    """Test that synthetic dataset generates correct batch shapes."""
+    num_samples = 10
+    height, width = 64, 64
+    vocab_size = 200
+    seq_len = 10
+
+    dataset = SyntheticGenCeptionDataset(
+        num_samples=num_samples, height=height, width=width,
+        vocab_size=vocab_size, seq_len=seq_len
+    )
+
+    assert len(dataset) == num_samples, f"Expected {num_samples} samples, got {len(dataset)}"
+
+    # Test getting a sample
+    image, token_ids = dataset[0]
+
+    assert image.shape == (3, height, width), f"Expected image shape (3, {height}, {width}), got {image.shape}"
+    assert token_ids.shape == (seq_len,), f"Expected token_ids shape ({seq_len},), got {token_ids.shape}"
+    print("✓ Synthetic dataset generates correct batch shapes")
+
+
+def test_training_step():
+    """Test that training step updates model parameters."""
+    batch_size = 4
+    height, width = 64, 64
+    vocab_size = 200
+    embed_dim = 128
+    base_channels = 16
+    num_classes = 10
+
+    model = GenCeption(vocab_size=vocab_size, embed_dim=embed_dim,
+                       base_channels=base_channels, num_blocks=3, num_classes=num_classes)
+    model.train()
+
+    # Create synthetic batch
+    dataset = SyntheticGenCeptionDataset(
+        num_samples=batch_size, height=height, width=width,
+        vocab_size=vocab_size, seq_len=10
+    )
+
+    # Manually create batch for testing
+    images = torch.stack([dataset[i][0] for i in range(batch_size)])
+    token_ids = torch.stack([dataset[i][1] for i in range(batch_size)])
+
+    # Create optimizer
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    # Get initial parameters
+    initial_params = [p.clone() for p in model.parameters()]
+
+    # Run training step
+    losses = train_genception_step(model, images, token_ids, torch.device('cpu'), optimizer=optimizer)
+
+    # Check that losses are computed
+    assert "total_loss" in losses, "Should have total_loss in output"
+    assert losses["total_loss"] > 0, "Loss should be positive"
+
+    # Check that some parameters have been updated
+    params_updated = False
+    for initial_p, current_p in zip(initial_params, model.parameters()):
+        if not torch.allclose(initial_p, current_p, atol=1e-5):
+            params_updated = True
+            break
+
+    assert params_updated, "Parameters should have been updated during training step"
+    print("✓ Training step updates model parameters correctly")
+
+
+def test_training_loop():
+    """Test a short training loop on synthetic data."""
+    batch_size = 4
+    height, width = 32, 32  # smaller for faster test
+    vocab_size = 100
+    embed_dim = 64
+    base_channels = 16
+    num_classes = 10
+    num_batches = 3
+
+    model = GenCeption(vocab_size=vocab_size, embed_dim=embed_dim,
+                       base_channels=base_channels, num_blocks=3, num_classes=num_classes)
+    model.train()
+
+    dataset = SyntheticGenCeptionDataset(
+        num_samples=batch_size * num_batches, height=height, width=width,
+        vocab_size=vocab_size, seq_len=8
+    )
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+    # Run training for a few batches
+    losses = []
+    for images, token_ids in dataloader:
+        loss_dict = train_genception_step(model, images, token_ids, torch.device('cpu'), optimizer=optimizer)
+        losses.append(loss_dict["total_loss"])
+
+    # Check that we ran training steps
+    assert len(losses) == num_batches, f"Expected {num_batches} losses, got {len(losses)}"
+
+    # Check that losses are valid numbers
+    for loss in losses:
+        assert isinstance(loss, float) and loss > 0, f"Loss should be positive float, got {loss}"
+
+    print(f"✓ Training loop completed {num_batches} batches with losses: {[f'{l:.4f}' for l in losses]}")
+
+
 if __name__ == "__main__":
     print("Running GenCeption Pass 1 tests...\n")
 
@@ -333,5 +498,13 @@ if __name__ == "__main__":
     test_genception_multi_task()
     test_genception_task_selection()
     test_genception_determinism_pass2()
+
+    print("\nRunning GenCeption Pass 3 tests...\n")
+
+    test_task_agnostic_refiner()
+    test_genception_with_refiner()
+    test_synthetic_dataset()
+    test_training_step()
+    test_training_loop()
 
     print("\n✓ All tests passed!")

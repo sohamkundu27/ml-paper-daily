@@ -88,3 +88,22 @@ The model takes an image and a natural-language instruction (e.g., "estimate dep
 - All tasks share the same conditioned feature representation (no task-specific feature extraction).
 - Segmentation uses num_classes=10 fixed; real segmentation would vary by dataset.
 - Decoder depth and width (64 hidden channels) is fixed and small; larger models would use task-specific depths.
+
+**Pass 3 — What is implemented:**
+- TaskAgnosticRefiner module: a shared refinement pipeline applied after instruction conditioning and before task-specific heads. The refiner consists of 2 configurable convolutional blocks (ConvBlock) that perform task-agnostic feature processing.
+- Integration into GenCeption: the refiner is applied in the forward pass after conditioning, so all outputs (depth, normals, segmentation) use refined features. This allows the model to learn task-agnostic feature transformations that benefit all downstream tasks.
+- SyntheticGenCeptionDataset: a PyTorch Dataset that generates random images and instructions for training experiments.
+- train_genception_step function: performs one gradient update step with synthetic targets. Generates task-agnostic synthetic targets for depth (random [0, 10]), normals (random unit vectors), and segmentation (random class labels), then computes and backpropagates multi-task loss (average of depth MSE, normals MSE, and segmentation cross-entropy).
+- Comprehensive Pass 3 tests: verifies refiner output shapes, that refinement modifies features, backward compatibility with refined features, dataset generation, parameter updates during training, and a mini training loop that runs multiple batches.
+
+**Simplified/stubbed for Pass 3:**
+- Task-agnostic refinement is implemented as simple sequential convolutional blocks (no skip connections, attention, or more sophisticated architectures).
+- Training loss is synthetic (generated on-the-fly): real scenarios would use actual ground-truth labels from a dataset (e.g., NYU Depth, Cityscapes).
+- No learning rate scheduling, batch normalization momentum tuning, or other training hyperparameter optimization.
+- No validation or metrics tracking during training (only loss values are reported).
+- Refiner is applied uniformly to all features; the paper may use adaptive refinement that depends on instruction or task.
+
+**Key assumptions for Pass 3:**
+- Task-agnostic refinement (shared across all tasks) improves feature quality without task-specific specialization.
+- Convolutional blocks are sufficient for refinement; more sophisticated operators (attention, gating, etc.) are not needed for this demonstration.
+- Synthetic targets are adequate to demonstrate gradient flow and parameter updates; real training would require proper datasets.

@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
 
 
 class SimpleTextEmbedding(nn.Module):
@@ -207,10 +209,34 @@ class TaskSelector(nn.Module):
         return task_logits, task_ids
 
 
+class TaskAgnosticRefiner(nn.Module):
+    """Shared refinement module for task-agnostic feature processing."""
+
+    def __init__(self, feature_channels, refinement_blocks=2):
+        super().__init__()
+        self.feature_channels = feature_channels
+        self.refinement_blocks = nn.ModuleList([
+            ConvBlock(feature_channels, feature_channels)
+            for _ in range(refinement_blocks)
+        ])
+
+    def forward(self, features):
+        """
+        Args:
+            features: (batch, channels, H, W) conditioned features
+        Returns:
+            refined: (batch, channels, H, W) refined features
+        """
+        refined = features
+        for block in self.refinement_blocks:
+            refined = block(refined)
+        return refined
+
+
 class GenCeption(nn.Module):
     """GenCeption: instruction-conditioned vision backbone with multi-task heads."""
 
-    def __init__(self, vocab_size=1000, embed_dim=128, base_channels=32, num_blocks=3, num_classes=10):
+    def __init__(self, vocab_size=1000, embed_dim=128, base_channels=32, num_blocks=3, num_classes=10, refinement_blocks=2):
         super().__init__()
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
@@ -222,6 +248,9 @@ class GenCeption(nn.Module):
                                                   base_channels=base_channels,
                                                   num_blocks=num_blocks)
         self.conditioner = InstructionConditioner(base_channels, embed_dim)
+
+        # Task-agnostic refinement (Pass 3)
+        self.refiner = TaskAgnosticRefiner(base_channels, refinement_blocks=refinement_blocks)
 
         # Task selection and decoder heads
         self.task_selector = TaskSelector(embed_dim, num_tasks=3)
@@ -250,17 +279,20 @@ class GenCeption(nn.Module):
         # Condition features on instruction
         conditioned_features = self.conditioner(image_features, instruction_vec)
 
+        # Refine features with task-agnostic refinement (Pass 3)
+        refined_features = self.refiner(conditioned_features)
+
         if not return_all_tasks:
-            # Pass 1 backward compatibility: return conditioned features
-            return conditioned_features
+            # Pass 1 backward compatibility: return refined features
+            return refined_features
 
         # Pass 2 and beyond: compute task-specific outputs
         task_logits, task_ids = self.task_selector(instruction_vec)
 
-        # Compute outputs for all tasks
-        depth_out = self.depth_head(conditioned_features)  # (batch, 1, H, W)
-        normals_out = self.normals_head(conditioned_features)  # (batch, 3, H, W)
-        seg_out = self.segmentation_head(conditioned_features)  # (batch, num_classes, H, W)
+        # Compute outputs for all tasks using refined features
+        depth_out = self.depth_head(refined_features)  # (batch, 1, H, W)
+        normals_out = self.normals_head(refined_features)  # (batch, 3, H, W)
+        seg_out = self.segmentation_head(refined_features)  # (batch, num_classes, H, W)
 
         output_dict = {
             "task_id": task_ids,
@@ -271,3 +303,82 @@ class GenCeption(nn.Module):
         }
 
         return output_dict
+
+
+class SyntheticGenCeptionDataset(Dataset):
+    """Synthetic dataset for GenCeption training."""
+
+    def __init__(self, num_samples=100, height=64, width=64, vocab_size=1000, seq_len=10):
+        self.num_samples = num_samples
+        self.height = height
+        self.width = width
+        self.vocab_size = vocab_size
+        self.seq_len = seq_len
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        # Generate random image
+        image = torch.randn(3, self.height, self.width)
+
+        # Generate random instruction tokens
+        token_ids = torch.randint(0, self.vocab_size, (self.seq_len,))
+
+        # Generate random task label (0=depth, 1=normals, 2=segmentation)
+        task_id = torch.randint(0, 3, (1,)).item()
+
+        return image, token_ids
+
+
+def train_genception_step(model, images, token_ids, device, optimizer=None):
+    """
+    Run one training step on a batch of synthetic data.
+
+    Args:
+        model: GenCeption model
+        images: (batch, 3, H, W) input images
+        token_ids: (batch, seq_len) token indices
+        device: torch device
+        optimizer: optimizer to update parameters. If None, only compute losses.
+
+    Returns:
+        dict with loss values
+    """
+    images = images.to(device)
+    token_ids = token_ids.to(device)
+
+    # Forward pass
+    outputs = model(images, token_ids, return_all_tasks=True)
+
+    # Create simple synthetic targets for demonstration
+    # (In a real scenario, these would come from ground truth labels)
+    batch_size, _, h, w = images.shape
+
+    # Depth loss: target depth map is uniform random
+    depth_target = torch.rand(batch_size, 1, h, w, device=device) * 10.0
+    depth_loss = F.mse_loss(outputs["depth"], depth_target)
+
+    # Normals loss: target normals are normalized random vectors
+    normals_target = torch.randn(batch_size, 3, h, w, device=device)
+    normals_target = normals_target / (torch.norm(normals_target, dim=1, keepdim=True) + 1e-6)
+    normals_loss = F.mse_loss(outputs["normals"], normals_target)
+
+    # Segmentation loss: target labels are random class indices
+    seg_target = torch.randint(0, 10, (batch_size, h, w), device=device)
+    seg_loss = F.cross_entropy(outputs["segmentation"], seg_target)
+
+    # Combined loss (weighted average)
+    total_loss = (depth_loss + normals_loss + seg_loss) / 3.0
+
+    if optimizer is not None:
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+
+    return {
+        "depth_loss": depth_loss.item(),
+        "normals_loss": normals_loss.item(),
+        "seg_loss": seg_loss.item(),
+        "total_loss": total_loss.item()
+    }
