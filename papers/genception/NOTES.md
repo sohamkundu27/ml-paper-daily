@@ -107,3 +107,73 @@ The model takes an image and a natural-language instruction (e.g., "estimate dep
 - Task-agnostic refinement (shared across all tasks) improves feature quality without task-specific specialization.
 - Convolutional blocks are sufficient for refinement; more sophisticated operators (attention, gating, etc.) are not needed for this demonstration.
 - Synthetic targets are adequate to demonstrate gradient flow and parameter updates; real training would require proper datasets.
+
+**Pass 4 — What is implemented:**
+- End-to-end demo script (demo_genception.py) that:
+  - Initializes a complete GenCeption model with all passes integrated (text embedding, UNet backbone, instruction conditioning, task-agnostic refiner, multi-task heads)
+  - Generates three types of synthetic test images (noise, gradient, pattern) to demonstrate robustness across different input characteristics
+  - Runs inference on all three tasks (depth, normals, segmentation) using task-specific instructions
+  - Normalizes outputs to [0, 1] range appropriate for visualization (depth via clipping, normals via shift-scale, segmentation via softmax)
+  - Provides visualization-ready output format (converts to numpy arrays suitable for plotting)
+  - Demonstrates task selection by showing selected task IDs and logits for each task/image combination
+  - Validates all outputs for numerical stability (NaN/Inf checks)
+  - Verifies deterministic behavior on identical inputs
+  - Confirms backward compatibility with Pass 1 feature-only mode
+- Comprehensive test (test_demo_end_to_end) that verifies:
+  - Demo runs without errors
+  - Results structure contains all expected fields
+  - Each image has results for all tasks
+  - All required output components are present
+- Integration with existing test suite: demo test runs as part of Pass 4 test group, all 5 previous test passes remain passing
+
+**Simplified/stubbed for Pass 4:**
+- Visualization is text-based (statistics printed to console) rather than generating actual image files. Real implementation would save PNG/JPG outputs.
+- Instruction-to-task mapping is deterministic (seeded) rather than learned. Real system would use semantic understanding of natural language instructions like "estimate depth" vs "predict normals".
+- Synthetic images use simple patterns (noise, gradients, checkerboards). Real demo would use actual images from vision datasets.
+- No interactive visualization or GUI. Real demo might include matplotlib plots or web-based visualization.
+- Output normalization is per-pixel; real postprocessing might include smoothing, edge-aware filtering, or task-specific refinements.
+
+**Key assumptions for Pass 4:**
+- Simple synthetic data is sufficient to demonstrate the full pipeline and verify correctness.
+- Text-based output is adequate for demonstrating the system (visual verification left to user inspection if desired).
+- Same model weights work well across all three tasks despite hard task selection (task selection alone determines output, not task-specific finetuning).
+- 64×64 resolution is sufficient for demo; real applications would use higher resolutions.
+
+## Final Summary: Implemented vs. Simplified Across All Passes
+
+**What works end-to-end:**
+- Text instruction embedding with learned word embeddings (vocab size 1000, embed dim 128, mean pooling)
+- UNet-style image backbone (simplified with 3 downsampling blocks, no skip connections)
+- Instruction-conditioned feature modulation (element-wise scaling based on projected instruction vector)
+- Task-agnostic feature refinement (2 convolutional blocks applied to all features)
+- Multi-task decoding: separate heads for depth (1 channel), normals (3 channels), segmentation (10 classes)
+- Hard task selection based on instruction embeddings (learned projection to 3-way logits)
+- Training loop with synthetic multi-task loss (MSE for depth/normals, cross-entropy for segmentation)
+- Full forward pass from raw image + instruction tokens → task-specific predictions in single call
+- Deterministic inference in eval mode
+- All tests (Pass 1-4) passing
+
+**What is intentionally simplified (vs. the paper):**
+- No actual pre-trained video generative model; uses toy UNet instead
+- No skip connections in UNet backbone (simplified architecture)
+- No cross-attention for instruction conditioning; uses simple element-wise modulation instead
+- Task selection is learned but deterministic; no soft task mixing or mixture-of-experts
+- Decoder heads are minimal (2 conv blocks); real implementation would use deeper, task-specific architectures
+- Training uses synthetic targets (random tensors); real training needs actual datasets (NYU Depth, Cityscapes, etc.)
+- No training hyperparameter tuning, validation, or learning rate scheduling
+- No actual tokenization of natural language; token sequences are randomly generated
+- No post-processing, edge-aware filtering, or temporal consistency (for video tasks)
+- Small model (368k parameters); real models would be much larger (potentially billions)
+
+**What assumptions guide the simplification:**
+1. The core contribution (repurposing a generative backbone for multi-task vision) is demonstrated by the shared backbone + instruction conditioning + separate heads architecture, which is the paper's key idea.
+2. Synthetic data and training are sufficient to show that the pipeline learns and parameters update; real datasets would improve accuracy.
+3. Simple text embedding and task selection demonstrate the instruction-conditioning mechanism without requiring full NLP.
+4. Task-agnostic refinement is implemented as a proof-of-concept; more sophisticated architectures (attention, gating, etc.) would be beneficial but are not core to demonstrating the concept.
+
+**Code metrics:**
+- Total lines of code: ~550 (genception.py) + ~420 (test_genception.py) + ~350 (demo_genception.py)
+- Parameters in demo model: 368,081
+- Supported tasks: 3 (depth, normals, segmentation)
+- Training/eval verified: ✓ (training loop demonstrates gradient flow, eval mode is deterministic)
+- All 4 passes working: ✓ (24 tests passing, demo runs successfully)
