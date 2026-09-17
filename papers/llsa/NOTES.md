@@ -33,3 +33,13 @@ Run a small synthetic diffusion task (e.g., denoising random noise) demonstratin
 - ✗ GPU kernel: using dense PyTorch operations for now (not optimized)
 - ✗ Integration with actual attention: just the indexing; actual QKV multiplication comes later
 - ✗ Learnable weights: selection is fixed Top-K; training comes in Pass 2
+
+### Pass 2 (Trainable log-linear attention mechanism)
+- ✓ Learnable log-linear block importance: each level has learnable parameters that determine block importance via exp(w_i)
+- ✓ Hierarchical selection with learned weights: replaces static Top-K with learned importance scores
+- ✓ Multi-head sparse attention: implemented Q, K, V projections and attention computation
+- ✓ Sparse attention computation: Q attends only to K, V from selected blocks (O(N * k) complexity)
+- ✓ End-to-end trainable projections: Q, K, V, output projections have gradients
+- ✗ Block weight gradients: topk operation is non-differentiable; block weight training via gradient estimators deferred to Pass 3
+- ✗ GPU kernel optimization: still using dense PyTorch operations
+- ✗ Integration with diffusion model: connects in Pass 3
