@@ -348,3 +348,167 @@ class TrainableSparseAttention(nn.Module):
             output = output.squeeze(0)
 
         return output
+
+
+class DiffusionTransformerBlock(nn.Module):
+    """
+    A single transformer block for diffusion models using sparse attention.
+
+    Combines sparse multi-head attention with feed-forward network and layer normalization.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int = 8,
+        ff_dim: int = 2048,
+        num_levels: int = 3,
+        dropout: float = 0.1
+    ):
+        """
+        Args:
+            d_model: embedding dimension
+            num_heads: number of attention heads
+            ff_dim: dimension of feed-forward inner layer
+            num_levels: number of hierarchical levels for sparse attention
+            dropout: dropout probability
+        """
+        super().__init__()
+        self.d_model = d_model
+
+        # Layer normalization
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+
+        # Sparse attention
+        self.attention = TrainableSparseAttention(
+            d_model=d_model,
+            num_heads=num_heads,
+            num_levels=num_levels,
+            dropout=dropout
+        )
+
+        # Feed-forward network
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, ff_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_dim, d_model),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Args:
+            x: input tensor (batch_size, seq_len, d_model) or (seq_len, d_model)
+            mask: optional attention mask
+
+        Returns:
+            output: same shape as input
+        """
+        # Self-attention with residual connection
+        attn_output = self.attention(self.norm1(x), mask)
+        x = x + attn_output
+
+        # Feed-forward with residual connection
+        ff_output = self.ff(self.norm2(x))
+        x = x + ff_output
+
+        return x
+
+
+class SimpleDiffusionModel(nn.Module):
+    """
+    A simple diffusion transformer backbone using hierarchical sparse attention.
+
+    Stacks multiple transformer blocks with sparse attention for efficient
+    processing of long token sequences.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int = 8,
+        num_layers: int = 4,
+        ff_dim: int = 2048,
+        num_levels: int = 3,
+        max_seq_len: int = 512,
+        dropout: float = 0.1
+    ):
+        """
+        Args:
+            d_model: embedding dimension
+            num_heads: number of attention heads
+            num_layers: number of transformer layers
+            ff_dim: dimension of feed-forward inner layer
+            num_levels: number of hierarchical levels for sparse attention
+            max_seq_len: maximum sequence length
+            dropout: dropout probability
+        """
+        super().__init__()
+        self.d_model = d_model
+        self.max_seq_len = max_seq_len
+
+        # Transformer layers with sparse attention
+        self.layers = nn.ModuleList([
+            DiffusionTransformerBlock(
+                d_model=d_model,
+                num_heads=num_heads,
+                ff_dim=ff_dim,
+                num_levels=num_levels,
+                dropout=dropout
+            )
+            for _ in range(num_layers)
+        ])
+
+        # Output normalization
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Args:
+            x: input tensor (batch_size, seq_len, d_model) or (seq_len, d_model)
+            mask: optional attention mask
+
+        Returns:
+            output: same shape as input
+        """
+        for layer in self.layers:
+            x = layer(x, mask)
+
+        x = self.norm(x)
+        return x
+
+    def compute_attention_complexity(self, seq_len: int) -> dict:
+        """
+        Compare theoretical complexity: sparse vs. full attention.
+
+        Args:
+            seq_len: sequence length
+
+        Returns:
+            dict with complexity metrics
+        """
+        # Full attention: O(N^2)
+        full_attn_ops = seq_len ** 2
+
+        # Sparse attention with hierarchical selection
+        # Each level selects a fraction of tokens
+        sparse_selected_tokens = 0
+        for level in range(self.layers[0].attention.num_levels):
+            block_size = max(1, seq_len // (2 ** (self.layers[0].attention.num_levels - level)))
+            num_blocks = (seq_len + block_size - 1) // block_size
+            sparsity_ratio = [0.125, 0.25, 0.5][min(level, 2)]
+            selected_at_level = int(num_blocks * sparsity_ratio) * block_size
+            sparse_selected_tokens = max(sparse_selected_tokens, selected_at_level)
+
+        # Sparse attention: O(N * k) where k is number of selected tokens
+        sparse_attn_ops = seq_len * sparse_selected_tokens
+
+        return {
+            "seq_len": seq_len,
+            "full_attention_ops": full_attn_ops,
+            "sparse_attention_ops": sparse_attn_ops,
+            "tokens_selected": sparse_selected_tokens,
+            "reduction_ratio": full_attn_ops / max(1, sparse_attn_ops),
+        }
