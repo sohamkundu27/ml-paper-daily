@@ -58,16 +58,21 @@ def test_switch_attention_routing():
 
     with torch.no_grad():
         output = attention(x)
+        routing_probs = attention.get_routing_decisions(x)
 
         # Verify output is valid and has no NaNs
         assert not torch.isnan(output).any(), "Output contains NaN values"
         assert output.dtype == x.dtype, f"Output dtype {output.dtype} does not match input dtype {x.dtype}"
 
+        # Verify routing probabilities are per-token
+        assert routing_probs.shape == (batch_size, seq_len, 1), f"Expected routing shape {(batch_size, seq_len, 1)}, got {routing_probs.shape}"
+        assert routing_probs.min() >= 0 and routing_probs.max() <= 1, "Routing probs should be in [0, 1]"
+
         # Verify output is a weighted combination (bounded)
         full_out = attention.full_attention(x)
         sliding_out = attention.sliding_attention(x)
 
-        # With a router outputting between 0 and 1, output should be bounded
+        # With per-token routing, output should interpolate between full and sliding
         min_val = torch.minimum(full_out, sliding_out).min()
         max_val = torch.maximum(full_out, sliding_out).max()
 
@@ -76,7 +81,7 @@ def test_switch_attention_routing():
         assert output.min() >= min_val - 1e-5, "Output below expected minimum"
         assert output.max() <= max_val + 1e-5, "Output above expected maximum"
 
-    print("✓ SwitchAttention routing works correctly")
+    print("✓ SwitchAttention per-token routing works correctly")
 
 
 def test_switch_attention_gradient_flow():

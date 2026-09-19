@@ -35,17 +35,24 @@ def main():
     attention.eval()
 
     with torch.no_grad():
-        # Get routing probability
-        routing_input = x.mean(dim=1)
-        routing_prob = attention.router(routing_input)
+        # Get per-token routing probabilities
+        routing_probs = attention.get_routing_decisions(x)  # (batch, seq_len, 1)
 
         # Compute outputs
         full_output = attention.full_attention(x)
         sliding_output = attention.sliding_attention(x)
         hybrid_output = attention(x)
 
-        print(f"\nRouting probability (full attention): {routing_prob.item():.4f}")
-        print(f"Routing probability (sliding window): {1 - routing_prob.item():.4f}")
+        print(f"\nPer-token routing statistics:")
+        print(f"  Mean routing prob (full attention): {routing_probs.mean().item():.4f}")
+        print(f"  Min routing prob: {routing_probs.min().item():.4f}")
+        print(f"  Max routing prob: {routing_probs.max().item():.4f}")
+        print(f"  Std routing prob: {routing_probs.std().item():.4f}")
+
+        full_attn_count = (routing_probs > 0.5).sum().item()
+        sliding_attn_count = (routing_probs <= 0.5).sum().item()
+        print(f"  Tokens routing to full attention: {full_attn_count}/{seq_len}")
+        print(f"  Tokens routing to sliding window: {sliding_attn_count}/{seq_len}")
 
         print(f"\nOutput shapes:")
         print(f"  Full attention output: {full_output.shape}")
@@ -58,8 +65,8 @@ def main():
         print(f"  Sliding window - mean: {sliding_output.mean().item():.4f}, std: {sliding_output.std().item():.4f}")
         print(f"  Hybrid - mean: {hybrid_output.mean().item():.4f}, std: {hybrid_output.std().item():.4f}")
 
-        # Verify interpolation
-        reconstructed = routing_prob * full_output + (1 - routing_prob) * sliding_output
+        # Verify per-token interpolation
+        reconstructed = routing_probs * full_output + (1 - routing_probs) * sliding_output
         diff = torch.abs(reconstructed - hybrid_output).max().item()
         print(f"\nInterpolation verification:")
         print(f"  Max difference between computed and expected: {diff:.2e}")

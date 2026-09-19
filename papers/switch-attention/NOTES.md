@@ -24,11 +24,28 @@ Self-attention in transformers scales quadratically with sequence length, making
 - ✅ Implemented `FullAttention`: standard multi-head self-attention
 - ✅ Implemented `SlidingWindowAttention`: local attention with fixed window size
 - ✅ Implemented `SwitchAttention`: hybrid module with a learnable binary router (simple gating)
-- ✅ Router uses token embeddings to predict routing probability per token
+- ✅ Router uses sequence-mean embeddings to predict single routing probability
 - ✅ Forward pass computes both heads and routes output via the router gate
 - ✅ Minimal test verifying output shapes and numerical correctness
 
 **Simplified:**
 - Router is very simple (single linear layer + sigmoid), not the full adaptive regularization from the paper
-- Routing decisions are made independently per token (no layer-aware or sequence-aware context in routing)
+- Routing decisions are made at sequence level (not per-token)
 - No continual pretraining; just a standalone module
+
+### Pass 2 Complete
+- ✅ Enhanced router to compute **per-token routing probabilities** instead of sequence-level
+- ✅ Implemented deeper MLP router: `Linear(d_model) -> ReLU -> Linear -> ReLU -> Linear -> Sigmoid`
+- ✅ Each token independently routed to full or sliding window attention based on its embedding
+- ✅ Added `get_routing_decisions()` method to inspect routing probabilities for analysis
+- ✅ Created `train_router.py`: trains router on synthetic task where important tokens need global context
+- ✅ Router successfully learns to minimize routing classification loss (26% reduction over 50 epochs)
+- ✅ Updated tests to verify per-token routing shapes and probability ranges
+- ✅ Updated demo to show per-token routing statistics and token distribution
+
+**Simplified:**
+- Synthetic task uses token norm as a proxy for importance (not real downstream task)
+- No integration with actual language model training or fine-tuning
+- Router trained with simple BCE loss against ground-truth labels, not end-to-end on downstream objectives
+- No analysis of actual computational savings (will be in Pass 3)
+- No layer-level or adaptive regularization per the original paper

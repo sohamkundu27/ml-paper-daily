@@ -96,20 +96,29 @@ class SlidingWindowAttention(nn.Module):
 
 
 class SwitchAttention(nn.Module):
-    """Hybrid attention that dynamically routes between full and sliding window attention."""
+    """Hybrid attention that dynamically routes between full and sliding window attention.
 
-    def __init__(self, d_model, num_heads, window_size=64, dropout=0.1):
+    Pass 2: Per-token routing with learnable MLP router that computes routing probability
+    for each token independently, allowing fine-grained control over which attention mechanism
+    is used for each position in the sequence.
+    """
+
+    def __init__(self, d_model, num_heads, window_size=64, dropout=0.1, routing_type='per_token'):
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
         self.window_size = window_size
+        self.routing_type = routing_type
 
         self.full_attention = FullAttention(d_model, num_heads, dropout)
         self.sliding_attention = SlidingWindowAttention(d_model, num_heads, window_size, dropout)
 
-        # Simple router: takes sequence embedding and predicts routing probability
+        # Learnable router: per-token routing with MLP
+        # Takes token embeddings and predicts routing probability for each token
         self.router = nn.Sequential(
-            nn.Linear(d_model, d_model // 4),
+            nn.Linear(d_model, d_model // 2),
+            nn.ReLU(),
+            nn.Linear(d_model // 2, d_model // 4),
             nn.ReLU(),
             nn.Linear(d_model // 4, 1),
             nn.Sigmoid()
@@ -122,12 +131,14 @@ class SwitchAttention(nn.Module):
         full_output = self.full_attention(x, mask)
         sliding_output = self.sliding_attention(x, mask)
 
-        # Compute routing probability per token using mean pooling over sequence
-        routing_input = x.mean(dim=1)  # (batch, d_model)
-        routing_prob = self.router(routing_input)  # (batch, 1)
-        routing_prob = routing_prob.unsqueeze(1)  # (batch, 1, 1) for broadcasting
+        # Compute per-token routing probabilities
+        routing_probs = self.router(x)  # (batch, seq_len, 1)
 
-        # Interpolate between full and sliding window attention
-        output = routing_prob * full_output + (1 - routing_prob) * sliding_output
+        # Interpolate between full and sliding window attention per-token
+        output = routing_probs * full_output + (1 - routing_probs) * sliding_output
 
         return output
+
+    def get_routing_decisions(self, x):
+        """Return routing probabilities for analysis and visualization."""
+        return self.router(x)  # (batch, seq_len, 1)
