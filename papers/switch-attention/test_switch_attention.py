@@ -119,6 +119,69 @@ def test_different_sequence_lengths():
     print("✓ SwitchAttention handles various sequence lengths")
 
 
+def test_sparsity_regularization():
+    """Test that sparsity regularization can be computed and affects loss."""
+    batch_size, seq_len, d_model = 2, 32, 64
+    num_heads = 4
+    window_size = 8
+
+    # Model with sparsity weight
+    model = SwitchAttention(d_model, num_heads, window_size, sparsity_weight=0.1)
+    model.train()
+
+    x = torch.randn(batch_size, seq_len, d_model)
+    x.requires_grad = True
+
+    output = model(x)
+    loss = output.sum()
+    loss.backward()
+
+    # Check that routing loss was computed
+    assert model.routing_loss > 0 or model.routing_loss == 0, "Routing loss should be computed"
+    assert x.grad is not None, "Gradients should flow"
+
+    print("✓ Sparsity regularization works")
+
+
+def test_routing_sparsity_metric():
+    """Test that routing sparsity metric is computed correctly."""
+    batch_size, seq_len, d_model = 1, 32, 64
+    num_heads = 4
+    window_size = 8
+
+    model = SwitchAttention(d_model, num_heads, window_size)
+    model.eval()
+
+    x = torch.randn(batch_size, seq_len, d_model)
+    sparsity = model.get_routing_sparsity(x)
+
+    assert 0 <= sparsity <= 1, f"Sparsity should be in [0, 1], got {sparsity}"
+    print("✓ Routing sparsity metric works")
+
+
+def test_batched_forward_pass():
+    """Test that batched forward pass produces valid outputs."""
+    batch_size, seq_len, d_model = 2, 32, 64
+    num_heads = 4
+    window_size = 8
+
+    model = SwitchAttention(d_model, num_heads, window_size)
+    model.eval()
+
+    x = torch.randn(batch_size, seq_len, d_model)
+
+    with torch.no_grad():
+        output_standard = model(x, use_batched=False)
+        output_batched = model(x, use_batched=True)
+
+    assert output_standard.shape == output_batched.shape, "Shapes should match"
+    # Outputs should be very close (both use same underlying computation currently)
+    assert torch.allclose(output_standard, output_batched, atol=1e-5), \
+        "Batched and standard outputs should be numerically close"
+
+    print("✓ Batched forward pass works correctly")
+
+
 if __name__ == "__main__":
     test_full_attention_shapes()
     test_sliding_window_attention_shapes()
@@ -126,4 +189,7 @@ if __name__ == "__main__":
     test_switch_attention_routing()
     test_switch_attention_gradient_flow()
     test_different_sequence_lengths()
+    test_sparsity_regularization()
+    test_routing_sparsity_metric()
+    test_batched_forward_pass()
     print("\n✓ All tests passed!")

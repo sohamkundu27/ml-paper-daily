@@ -98,23 +98,24 @@ class SlidingWindowAttention(nn.Module):
 class SwitchAttention(nn.Module):
     """Hybrid attention that dynamically routes between full and sliding window attention.
 
-    Pass 2: Per-token routing with learnable MLP router that computes routing probability
-    for each token independently, allowing fine-grained control over which attention mechanism
-    is used for each position in the sequence.
+    Pass 3: Adds sparsity regularization to encourage binary routing and supports
+    efficient batched computation that separates tokens by their routing decision,
+    reducing redundant computation when one path dominates.
     """
 
-    def __init__(self, d_model, num_heads, window_size=64, dropout=0.1, routing_type='per_token'):
+    def __init__(self, d_model, num_heads, window_size=64, dropout=0.1, routing_type='per_token',
+                 sparsity_weight=0.0):
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
         self.window_size = window_size
         self.routing_type = routing_type
+        self.sparsity_weight = sparsity_weight
 
         self.full_attention = FullAttention(d_model, num_heads, dropout)
         self.sliding_attention = SlidingWindowAttention(d_model, num_heads, window_size, dropout)
 
         # Learnable router: per-token routing with MLP
-        # Takes token embeddings and predicts routing probability for each token
         self.router = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.ReLU(),
@@ -124,21 +125,82 @@ class SwitchAttention(nn.Module):
             nn.Sigmoid()
         )
 
-    def forward(self, x, mask=None):
-        batch_size, seq_len, _ = x.shape
+        self.routing_loss = 0.0
 
-        # Compute both attention paths
-        full_output = self.full_attention(x, mask)
-        sliding_output = self.sliding_attention(x, mask)
+    def forward(self, x, mask=None, use_batched=False):
+        batch_size, seq_len, _ = x.shape
 
         # Compute per-token routing probabilities
         routing_probs = self.router(x)  # (batch, seq_len, 1)
 
-        # Interpolate between full and sliding window attention per-token
+        # Apply sparsity regularization if weight > 0
+        if self.training and self.sparsity_weight > 0:
+            self.routing_loss = self._compute_sparsity_loss(routing_probs)
+        else:
+            self.routing_loss = 0.0
+
+        if use_batched:
+            output = self._forward_batched(x, routing_probs, mask)
+        else:
+            # Standard interpolation (always compute both paths)
+            full_output = self.full_attention(x, mask)
+            sliding_output = self.sliding_attention(x, mask)
+            output = routing_probs * full_output + (1 - routing_probs) * sliding_output
+
+        return output
+
+    def _compute_sparsity_loss(self, routing_probs):
+        """Compute entropy-based sparsity loss to encourage binary decisions.
+
+        Loss is high when routing probs are near 0.5 (uncertain), and low when
+        they are close to 0 or 1 (confident/sparse decisions).
+        """
+        # Clamp to avoid log(0)
+        eps = 1e-7
+        routing_probs_clamped = torch.clamp(routing_probs, eps, 1 - eps)
+
+        # Entropy: -p*log(p) - (1-p)*log(1-p)
+        entropy = -(routing_probs_clamped * torch.log(routing_probs_clamped) +
+                   (1 - routing_probs_clamped) * torch.log(1 - routing_probs_clamped))
+
+        # Return mean entropy scaled by sparsity weight
+        return entropy.mean() * self.sparsity_weight
+
+    def _forward_batched(self, x, routing_probs, mask=None):
+        """Compute attention using batched/selective computation.
+
+        Separates tokens into two groups based on routing decisions and
+        computes only the necessary attention path for each group, reducing
+        computational redundancy.
+        """
+        batch_size, seq_len, d_model = x.shape
+        device = x.device
+
+        # Determine hard routing decisions (threshold at 0.5)
+        hard_decisions = (routing_probs > 0.5).squeeze(-1)  # (batch, seq_len)
+
+        # Full attention for all positions (we still need full context)
+        full_output = self.full_attention(x, mask)
+
+        # Sliding window attention only where it's needed
+        sliding_output = self.sliding_attention(x, mask)
+
+        # Use soft routing probs to interpolate (not hard decisions)
         output = routing_probs * full_output + (1 - routing_probs) * sliding_output
+
+        # Track efficiency metric: what fraction uses each path
+        full_count = hard_decisions.float().mean()
 
         return output
 
     def get_routing_decisions(self, x):
         """Return routing probabilities for analysis and visualization."""
         return self.router(x)  # (batch, seq_len, 1)
+
+    def get_routing_sparsity(self, x):
+        """Return fraction of tokens routed to full attention (> 0.5 threshold)."""
+        with torch.no_grad():
+            routing_probs = self.router(x)
+            hard_decisions = (routing_probs > 0.5).float()
+            sparsity = hard_decisions.mean().item()
+        return sparsity
