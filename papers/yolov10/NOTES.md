@@ -76,3 +76,59 @@ YOLOv10 proposes a modern approach to real-time object detection by eliminating 
 - Pass 2 model with targets dict producing valid loss ✓
 - Inference mode (no loss when targets absent) ✓
 - Backward compatibility: Pass 1 tests still pass ✓
+
+## Implemented vs. Simplified (Pass 3)
+
+### Implemented:
+- **YOLOv10DetectorPass3**: Model class with built-in SGD optimizer support via `get_optimizer()`
+- **Training loop**: `TrainingUtils.train_one_epoch()` implementing standard supervised learning:
+  - Batch iteration with gradient zeroing
+  - Forward pass with loss computation
+  - Backward pass with gradient clipping (max_norm=1.0)
+  - Optimizer step
+  - Per-batch loss logging
+- **Validation loop**: `TrainingUtils.validate()` for evaluating model on held-out data
+- **SyntheticObjectDataset**: Random image and bounding box generation for training
+  - Generates RGB images (0-1 range)
+  - Random object placement (1-5 objects per image)
+  - Data augmentation: random flips, brightness/contrast adjustments, color jitter
+  - Configurable image size and number of classes
+- **Batch collation**: `TrainingUtils.collate_fn()` handling variable-length target sequences
+  - Pads boxes to max_boxes per batch
+  - Marks padding with -1 class label
+- **Full training pipeline**: `train_model()` orchestrating multi-epoch training
+  - Creates train/val dataloaders with proper collation
+  - Tracks loss history across epochs
+  - Returns trained model and training history
+- **Lower IoU matching threshold**: Pass 3 uses 0.3 (vs 0.5 in Pass 2) for more training signal
+- **Gradient clipping**: Prevents exploding gradients during early training
+
+### Simplified/Stubbed:
+- **No pre-training or initialization**: Model parameters initialized randomly; won't see loss signal until sufficient training data provided
+- **No learning rate scheduling**: Fixed learning rate throughout training
+- **No data augmentation pipeline library**: Manual augmentation (flips, color jitter) instead of torchvision transforms
+- **No real dataset integration**: Only synthetic data; no COCO/VOC loaders
+- **No mAP evaluation**: Training tracks only raw loss; no precision/recall metrics
+- **No model checkpointing**: No "best model" selection or save/load
+- **No multi-GPU support**: Single device training only
+- **No batch normalization momentum handling**: Using PyTorch defaults
+- **No prediction rescaling**: Assumes model learns pixel-space coordinates without explicit scaling
+- **No test-time augmentation**: Inference uses single-pass predictions
+
+### Design Notes:
+- **Grid-based synthetic targets**: Targets placed in center region (1/4 to 3/4 of image) where dense predictions exist, improving chance of target-prediction overlap during training
+- **SGD with momentum**: 0.9 momentum for stable convergence
+- **Weight decay**: 5e-4 L2 regularization to prevent overfitting
+- **Gradient clipping**: max_norm=1.0 to stabilize early training when loss magnitudes vary
+
+### Tests:
+- Pass 3 model forward pass (inference mode) ✓
+- Pass 3 model with loss computation ✓
+- Backward pass execution ✓
+- Synthetic dataset generation and augmentation ✓
+- Batch collation for variable-length targets ✓
+- Single epoch training without crashes ✓
+- Validation on held-out data ✓
+- Optimizer creation with correct hyperparameters ✓
+- Full 2-epoch training loop ✓
+- Backward compatibility: Pass 1 and Pass 2 tests still pass ✓

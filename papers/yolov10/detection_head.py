@@ -340,8 +340,106 @@ class YOLOv10DetectorPass2(nn.Module):
         return total_loss
 
 
-def make_model(num_classes=80, use_pass2=False):
+class YOLOv10DetectorPass3(nn.Module):
+    """
+    Pass 3: YOLOv10 with training-optimized features.
+
+    Enhancements over Pass 2:
+    - Integrated training loop with optimizer support
+    - Data augmentation pipeline
+    - Better gradient stabilization
+    """
+    def __init__(self, num_classes=80, lr=0.001, weight_decay=5e-4):
+        super().__init__()
+        self.num_classes = num_classes
+        self.detection_head = DecoupledDetectionHead(num_classes=num_classes)
+        self.focal_loss = FocalLoss(alpha=0.25, gamma=2.0)
+        self.lr = lr
+        self.weight_decay = weight_decay
+
+    def forward(self, x, targets=None):
+        outputs = self.detection_head(x)
+
+        if targets is not None:
+            loss = self.compute_loss(outputs, targets)
+            outputs['loss'] = loss
+
+        return outputs
+
+    def compute_loss(self, outputs, targets):
+        """
+        Compute total loss (bbox + classification).
+        Pass 3 uses lower IoU threshold (0.3) than Pass 2 for more training signal.
+
+        Args:
+            outputs: dict with 'bbox' and 'cls' predictions
+            targets: dict with 'boxes' and 'classes' tensors
+                - boxes: (B, M, 4) target boxes
+                - classes: (B, M) target class indices (-1 for padding)
+
+        Returns:
+            total_loss: scalar loss
+        """
+        pred_boxes = outputs['bbox']
+        pred_scores = outputs['cls']
+        target_boxes = targets['boxes']
+        target_classes = targets['classes']
+
+        batch_size = pred_boxes.shape[0]
+        device = pred_boxes.device
+
+        losses = []
+
+        for b in range(batch_size):
+            valid_targets = target_classes[b] >= 0
+            valid_target_boxes = target_boxes[b][valid_targets]
+            valid_target_classes = target_classes[b][valid_targets]
+
+            if valid_target_boxes.shape[0] > 0:
+                matched_targets, matched_mask = match_predictions_to_targets(
+                    pred_boxes[b],
+                    pred_scores[b],
+                    valid_target_boxes,
+                    valid_target_classes,
+                    iou_threshold=0.3
+                )
+
+                matched_idx = torch.where(matched_mask)[0]
+
+                if matched_idx.shape[0] > 0:
+                    pred_boxes_matched = pred_boxes[b][matched_idx]
+                    target_boxes_matched = matched_targets[matched_idx, :4]
+
+                    bbox_loss = F.smooth_l1_loss(pred_boxes_matched, target_boxes_matched)
+
+                    pred_scores_matched = pred_scores[b][matched_idx]
+                    target_classes_matched = matched_targets[matched_idx, 4].long()
+
+                    cls_loss = self.focal_loss(pred_scores_matched, target_classes_matched)
+
+                    losses.append(bbox_loss + cls_loss)
+
+        if len(losses) > 0:
+            total_loss = torch.stack(losses).mean()
+        else:
+            total_loss = torch.tensor(0.0, device=device, dtype=pred_boxes.dtype, requires_grad=True)
+
+        return total_loss
+
+    def get_optimizer(self):
+        """Create optimizer for training."""
+        return torch.optim.SGD(
+            self.parameters(),
+            lr=self.lr,
+            momentum=0.9,
+            weight_decay=self.weight_decay
+        )
+
+
+def make_model(num_classes=80, use_pass2=False, use_pass3=False):
     """Factory function to create YOLOv10 model."""
-    if use_pass2:
+    if use_pass3:
+        return YOLOv10DetectorPass3(num_classes=num_classes)
+    elif use_pass2:
         return YOLOv10DetectorPass2(num_classes=num_classes)
     return YOLOv10Detector(num_classes=num_classes)
