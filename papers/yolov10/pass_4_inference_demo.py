@@ -78,7 +78,7 @@ class InferenceEngine:
 
             for box, cls_idx, score in zip(valid_boxes, valid_classes, valid_scores):
                 results.append({
-                    'box': box.cpu().numpy(),
+                    'box': box.detach().cpu().numpy(),
                     'class': cls_idx.item(),
                     'score': score.item(),
                 })
