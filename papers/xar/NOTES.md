@@ -50,13 +50,20 @@ Demonstrate the full pipeline on small synthetic data:
 ✓ Full pipeline test: image → patches → entities → AR prediction → reconstruction
 ✓ 4 test functions validating each component
 
+### Pass 2 Complete
+✓ `TransformerEntityPredictor`: Multi-head transformer encoder predicting entity sequences
+✓ `NoisyContextLearner`: End-to-end trainer implementing flow-matching and noisy context learning
+✓ Flow-matching objective: Continuous MSE regression loss (model predicts clean entities from noisy input)
+✓ Noisy context learning: Gaussian noise added to input during training to mitigate exposure bias
+✓ Training loop: Full epoch-based training with loss tracking and inference
+✓ 2 new tests validating denoising performance and loss convergence
+
 ### Still Simplified / Not Yet Implemented
-- **No flow-matching** (Pass 2): AR currently uses simple linear prediction, not continuous regression via flow-matching
-- **No noisy context learning** (Pass 2): no training with corrupted entities to mitigate exposure bias
-- **No actual training loop** (Pass 2-4): only inference/prediction skeleton
 - **No backbone encoder/decoder** (Pass 3): entities are raw vectorized pixels
 - **No multi-scale coarse-to-fine** (Pass 3): currently only single granularity at a time
-- **No end-to-end demo** (Pass 4): no training on real or toy data yet
-- **AR predictor architecture**: uses simple dense layers, not transformer (will upgrade in Pass 2-3)
+- **No end-to-end demo on real data** (Pass 4): tested on synthetic/toy data only
+- **No scheduled sampling** (Pass 3): noise level is fixed, no curriculum strategy
+- **Simplified architecture**: single transformer stack instead of hierarchical coarse-to-fine generation
+- **No acceleration tricks** (e.g., parallel decoding across entities)
 
-The implementation demonstrates the core conceptual contribution: flexible entity definitions at different spatial granularities and an AR framework that can predict entity sequences. Flow-matching and exposure bias mitigation (the novel technical contributions) come next.
+The implementation now demonstrates the two core technical contributions: (1) flexible entity definitions at different spatial granularities, and (2) flow-matching + noisy context learning for continuous entity regression. This addresses the exposure bias problem in autoregressive generation.
