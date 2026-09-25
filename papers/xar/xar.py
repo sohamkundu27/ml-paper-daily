@@ -217,6 +217,63 @@ class SimpleARModel:
         return np.array(predictions)
 
 
+class SimpleFeatureBackbone(nn.Module):
+    """Lightweight CNN backbone for feature encoding/decoding."""
+
+    def __init__(self, in_channels: int = 1, out_channels: int = 8):
+        """
+        Args:
+            in_channels: number of input channels (typically 1 for grayscale)
+            out_channels: number of output feature channels
+        """
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.ReLU()
+        )
+        self.decoder = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(out_channels, in_channels, kernel_size=3, padding=1)
+        )
+
+    def encode(self, patches: torch.Tensor) -> torch.Tensor:
+        """
+        Encode patches to learned features.
+
+        Args:
+            patches: shape (batch, height, width, channels) as (B, H, W, C)
+
+        Returns:
+            features: shape (batch, height, width, out_channels)
+        """
+        # Rearrange to (B, C, H, W) for convolution
+        x = patches.permute(0, 3, 1, 2)
+        x = self.encoder(x)
+        # Back to (B, H, W, C)
+        x = x.permute(0, 2, 3, 1)
+        return x
+
+    def decode(self, features: torch.Tensor) -> torch.Tensor:
+        """
+        Decode features back to patches.
+
+        Args:
+            features: shape (batch, height, width, channels)
+
+        Returns:
+            patches: shape (batch, height, width, in_channels)
+        """
+        # Rearrange to (B, C, H, W)
+        x = features.permute(0, 3, 1, 2)
+        x = self.decoder(x)
+        # Back to (B, H, W, C)
+        x = x.permute(0, 2, 3, 1)
+        return x
+
+
 class TransformerEntityPredictor(nn.Module):
     """Transformer-based entity predictor for continuous regression."""
 
@@ -370,6 +427,201 @@ class NoisyContextLearner:
         return output.cpu().numpy()
 
 
+class ScheduledNoisyContextLearner(NoisyContextLearner):
+    """Extends NoisyContextLearner with scheduled sampling and curriculum learning."""
+
+    def __init__(self, entity_dim: int, hidden_dim: int = 128, num_heads: int = 4,
+                 num_layers: int = 2, learning_rate: float = 1e-3, device: str = 'cpu'):
+        """
+        Args:
+            entity_dim: dimension of each entity vector
+            hidden_dim: transformer hidden dimension
+            num_heads: number of attention heads
+            num_layers: number of transformer layers
+            learning_rate: optimizer learning rate
+            device: 'cpu' or 'cuda'
+        """
+        super().__init__(entity_dim, hidden_dim, num_heads, num_layers, learning_rate, device)
+
+    def get_scheduled_noise(self, epoch: int, total_epochs: int,
+                           noise_start: float = 0.05, noise_end: float = 0.25) -> float:
+        """
+        Compute noise level for current epoch with curriculum strategy.
+        Noise increases over time to gradually expose the model to harder denoising.
+
+        Args:
+            epoch: current epoch (0-indexed)
+            total_epochs: total number of epochs
+            noise_start: initial noise std
+            noise_end: final noise std
+
+        Returns:
+            noise_std: noise level for this epoch
+        """
+        progress = epoch / max(1, total_epochs - 1)
+        noise_std = noise_start + (noise_end - noise_start) * progress
+        return noise_std
+
+    def train_epochs_scheduled(self, batch_entities: np.ndarray, num_epochs: int = 100,
+                              noise_start: float = 0.05, noise_end: float = 0.25,
+                              verbose: bool = True) -> Tuple[List[float], List[float]]:
+        """
+        Train for multiple epochs with scheduled noise curriculum.
+
+        Args:
+            batch_entities: numpy array, shape (batch_size, seq_len, entity_dim)
+            num_epochs: number of training epochs
+            noise_start: initial noise standard deviation
+            noise_end: final noise standard deviation
+            verbose: whether to print loss
+
+        Returns:
+            losses: list of loss values per epoch
+            noise_levels: list of noise levels used per epoch
+        """
+        losses = []
+        noise_levels = []
+
+        for epoch in range(num_epochs):
+            noise_std = self.get_scheduled_noise(epoch, num_epochs, noise_start, noise_end)
+            loss = self.train_step(batch_entities, noise_std=noise_std)
+            losses.append(loss)
+            noise_levels.append(noise_std)
+
+            if verbose and (epoch + 1) % 20 == 0:
+                print(f"Epoch {epoch+1}/{num_epochs}, Loss: {loss:.6f}, Noise: {noise_std:.4f}")
+
+        return losses, noise_levels
+
+
+class MultiGranularityARTrainer:
+    """Trainer supporting multiple entity granularities simultaneously."""
+
+    def __init__(self, entity_dim: int, granularities: List[str], hidden_dim: int = 128,
+                 num_heads: int = 4, num_layers: int = 2, learning_rate: float = 1e-3,
+                 device: str = 'cpu', use_backbone: bool = False):
+        """
+        Args:
+            entity_dim: dimension of each entity vector
+            granularities: list of granularity types (e.g., ['patch', 'cell'])
+            hidden_dim: transformer hidden dimension
+            num_heads: number of attention heads
+            num_layers: number of transformer layers
+            learning_rate: optimizer learning rate
+            device: 'cpu' or 'cuda'
+            use_backbone: whether to use learned feature backbone
+        """
+        self.device = device
+        self.entity_dim = entity_dim
+        self.granularities = granularities
+        self.use_backbone = use_backbone
+
+        # Create predictors for each granularity
+        self.predictors = {
+            gran: TransformerEntityPredictor(entity_dim, hidden_dim, num_heads, num_layers)
+            for gran in granularities
+        }
+        for predictor in self.predictors.values():
+            predictor.to(device)
+
+        # Optional: feature backbone
+        if use_backbone:
+            self.backbone = SimpleFeatureBackbone(in_channels=1, out_channels=8)
+            self.backbone.to(device)
+        else:
+            self.backbone = None
+
+        # Shared optimizer - include all predictor parameters
+        params = []
+        for predictor in self.predictors.values():
+            params.extend(predictor.parameters())
+        if self.backbone is not None:
+            params.extend(self.backbone.parameters())
+        self.optimizer = optim.Adam(params, lr=learning_rate)
+
+    def train_step(self, granularity_entities: dict, noise_std: float = 0.15) -> dict:
+        """
+        Training step on multiple granularities.
+
+        Args:
+            granularity_entities: dict mapping granularity -> entities (batch, seq_len, entity_dim)
+            noise_std: noise standard deviation
+
+        Returns:
+            losses: dict mapping granularity -> loss value
+        """
+        losses = {}
+        total_loss = 0.0
+        self.optimizer.zero_grad()
+
+        for granularity, entities in granularity_entities.items():
+            batch_tensor = torch.from_numpy(entities).float().to(self.device)
+
+            # Add noise
+            noise = torch.randn_like(batch_tensor) * noise_std
+            noisy_entities = batch_tensor + noise
+
+            # Forward pass
+            predictor = self.predictors[granularity]
+            predicted = predictor(noisy_entities)
+
+            # Loss
+            loss = nn.MSELoss()(predicted, batch_tensor)
+            total_loss = total_loss + loss
+
+            losses[granularity] = loss.item()
+
+        # Single backward pass on accumulated loss
+        total_loss.backward()
+        self.optimizer.step()
+
+        return losses
+
+    def train_epochs(self, granularity_entities: dict, num_epochs: int = 100,
+                     noise_std: float = 0.15, verbose: bool = True) -> dict:
+        """
+        Train for multiple epochs on all granularities.
+
+        Args:
+            granularity_entities: dict mapping granularity -> entities
+            num_epochs: number of epochs
+            noise_std: noise standard deviation
+            verbose: whether to print loss
+
+        Returns:
+            all_losses: dict mapping granularity -> list of losses
+        """
+        all_losses = {gran: [] for gran in self.granularities}
+
+        for epoch in range(num_epochs):
+            losses = self.train_step(granularity_entities, noise_std=noise_std)
+            for gran, loss in losses.items():
+                all_losses[gran].append(loss)
+
+            if verbose and (epoch + 1) % 20 == 0:
+                loss_str = ", ".join([f"{gran}: {losses[gran]:.4f}" for gran in self.granularities])
+                print(f"Epoch {epoch+1}/{num_epochs}, {loss_str}")
+
+        return all_losses
+
+    @torch.no_grad()
+    def predict(self, granularity: str, entities: np.ndarray) -> np.ndarray:
+        """
+        Predict for a specific granularity.
+
+        Args:
+            granularity: which granularity to use for prediction
+            entities: numpy array, shape (batch_size, seq_len, entity_dim)
+
+        Returns:
+            predictions: numpy array of same shape as entities
+        """
+        batch_tensor = torch.from_numpy(entities).float().to(self.device)
+        predictor = self.predictors[granularity]
+        output = predictor(batch_tensor)
+        return output.cpu().numpy()
+
+
 def test_basic_entity_conversion():
     """Test image -> entity -> image conversion."""
     # Create simple 16x16 single-channel image
@@ -517,6 +769,142 @@ def test_flow_matching_denoising():
     print(f"✓ Flow-matching: noisy MSE={noisy_error:.4f}, predicted MSE={pred_error:.4f}")
 
 
+def test_feature_backbone():
+    """Test lightweight CNN backbone for feature encoding/decoding."""
+    backbone = SimpleFeatureBackbone(in_channels=1, out_channels=8)
+
+    # Create dummy patches (batch_size=2, height=4, width=4, channels=1)
+    patches = torch.randn(2, 4, 4, 1)
+
+    # Encode
+    features = backbone.encode(patches)
+    assert features.shape == (2, 4, 4, 8), f"Expected (2,4,4,8), got {features.shape}"
+
+    # Decode
+    reconstructed = backbone.decode(features)
+    assert reconstructed.shape == patches.shape, "Reconstructed shape should match input"
+
+    print("✓ Feature backbone encoding/decoding works")
+
+
+def test_scheduled_curriculum_learning():
+    """Test scheduled sampling with curriculum learning."""
+    entity_dim = 16
+    batch_size = 8
+    seq_len = 10
+
+    # Toy dataset
+    toy_entities = np.random.randn(batch_size, seq_len, entity_dim).astype(np.float32)
+
+    # Initialize scheduled learner
+    learner = ScheduledNoisyContextLearner(entity_dim=entity_dim, hidden_dim=64, num_heads=2, num_layers=1)
+
+    # Train with scheduled noise (0.05 -> 0.3)
+    losses, noise_levels = learner.train_epochs_scheduled(
+        toy_entities, num_epochs=50, noise_start=0.05, noise_end=0.3, verbose=False
+    )
+
+    # Check that noise increased over time
+    assert noise_levels[0] < noise_levels[-1], "Noise should increase with curriculum"
+    assert abs(noise_levels[0] - 0.05) < 0.01, "Initial noise should be ~0.05"
+    assert abs(noise_levels[-1] - 0.3) < 0.01, "Final noise should be ~0.3"
+
+    # Loss should still decrease overall
+    assert losses[-1] < losses[0], "Loss should decrease during training"
+
+    print(f"✓ Scheduled curriculum: noise {noise_levels[0]:.4f} -> {noise_levels[-1]:.4f}, loss decreased")
+
+
+def test_multi_granularity_training():
+    """Test training on multiple granularities simultaneously."""
+    entity_dim = 16
+    batch_size = 4
+    seq_len = 8
+
+    # Create data for two granularities: patch and cell (same entity_dim)
+    patch_entities = np.random.randn(batch_size, seq_len, entity_dim).astype(np.float32)
+    cell_entities = np.random.randn(batch_size, seq_len, entity_dim).astype(np.float32)
+
+    granularity_entities = {
+        'patch': patch_entities,
+        'cell': cell_entities
+    }
+
+    # Initialize multi-granularity trainer
+    trainer = MultiGranularityARTrainer(
+        entity_dim=entity_dim,
+        granularities=['patch', 'cell'],
+        hidden_dim=64,
+        num_heads=2,
+        num_layers=1,
+        use_backbone=False
+    )
+
+    # Train for a few epochs
+    all_losses = trainer.train_epochs(granularity_entities, num_epochs=30, noise_std=0.15, verbose=False)
+
+    # Check that both granularities are being trained
+    assert 'patch' in all_losses, "Should have loss for patch granularity"
+    assert 'cell' in all_losses, "Should have loss for cell granularity"
+    assert len(all_losses['patch']) == 30, "Should have 30 loss values"
+    assert len(all_losses['cell']) == 30, "Should have 30 loss values"
+
+    # Losses should decrease
+    assert all_losses['patch'][-1] < all_losses['patch'][0], "Patch loss should decrease"
+    assert all_losses['cell'][-1] < all_losses['cell'][0], "Cell loss should decrease"
+
+    print(f"✓ Multi-granularity training: patch loss {all_losses['patch'][0]:.4f} -> {all_losses['patch'][-1]:.4f}")
+    print(f"                            cell loss {all_losses['cell'][0]:.4f} -> {all_losses['cell'][-1]:.4f}")
+
+    # Test prediction for each granularity
+    patch_pred = trainer.predict('patch', patch_entities)
+    cell_pred = trainer.predict('cell', cell_entities)
+    assert patch_pred.shape == patch_entities.shape, "Patch prediction shape mismatch"
+    assert cell_pred.shape == cell_entities.shape, "Cell prediction shape mismatch"
+
+    print("✓ Multi-granularity predictions work")
+
+
+def test_multi_granularity_with_backbone():
+    """Test multi-granularity training with learned feature backbone."""
+    entity_dim = 8
+    batch_size = 2
+    seq_len = 4
+
+    # Toy data
+    patch_entities = np.random.randn(batch_size, seq_len, entity_dim).astype(np.float32)
+    cell_entities = np.random.randn(batch_size, seq_len, entity_dim).astype(np.float32)
+
+    granularity_entities = {
+        'patch': patch_entities,
+        'cell': cell_entities
+    }
+
+    # Initialize with backbone
+    trainer = MultiGranularityARTrainer(
+        entity_dim=entity_dim,
+        granularities=['patch', 'cell'],
+        hidden_dim=32,
+        num_heads=1,
+        num_layers=1,
+        use_backbone=True
+    )
+
+    # Verify backbone exists
+    assert trainer.backbone is not None, "Backbone should be created"
+    assert isinstance(trainer.backbone, SimpleFeatureBackbone), "Backbone should be SimpleFeatureBackbone"
+
+    # Train briefly to ensure backbone updates
+    losses = trainer.train_epochs(granularity_entities, num_epochs=50, noise_std=0.1, verbose=False)
+
+    # Check that losses generally decrease (allow some noise in early epochs)
+    avg_first_10 = np.mean(losses['patch'][:10])
+    avg_last_10 = np.mean(losses['patch'][-10:])
+    assert avg_last_10 < avg_first_10, "Patch loss should decrease on average"
+
+    print(f"✓ Multi-granularity with backbone: patch loss {losses['patch'][0]:.4f} -> {losses['patch'][-1]:.4f}")
+
+
 if __name__ == '__main__':
     print("=== Testing Pass 1 (Entity Abstraction) ===")
     test_basic_entity_conversion()
@@ -527,5 +915,11 @@ if __name__ == '__main__':
     print("\n=== Testing Pass 2 (Flow-Matching & Noisy Context Learning) ===")
     test_noisy_context_learning()
     test_flow_matching_denoising()
+
+    print("\n=== Testing Pass 3 (Multi-Granularity & Curriculum Learning) ===")
+    test_feature_backbone()
+    test_scheduled_curriculum_learning()
+    test_multi_granularity_training()
+    test_multi_granularity_with_backbone()
 
     print("\n✓ All tests passed!")

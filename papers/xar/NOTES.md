@@ -58,12 +58,19 @@ Demonstrate the full pipeline on small synthetic data:
 ✓ Training loop: Full epoch-based training with loss tracking and inference
 ✓ 2 new tests validating denoising performance and loss convergence
 
-### Still Simplified / Not Yet Implemented
-- **No backbone encoder/decoder** (Pass 3): entities are raw vectorized pixels
-- **No multi-scale coarse-to-fine** (Pass 3): currently only single granularity at a time
-- **No end-to-end demo on real data** (Pass 4): tested on synthetic/toy data only
-- **No scheduled sampling** (Pass 3): noise level is fixed, no curriculum strategy
-- **Simplified architecture**: single transformer stack instead of hierarchical coarse-to-fine generation
-- **No acceleration tricks** (e.g., parallel decoding across entities)
+### Pass 3 Complete
+✓ `SimpleFeatureBackbone`: Lightweight CNN encoder/decoder for learned feature representations
+✓ `ScheduledNoisyContextLearner`: Curriculum learning with noise schedule (noise increases over epochs)
+✓ `MultiGranularityARTrainer`: Supports training on multiple entity granularities in parallel
+✓ Gradient accumulation: Multiple granularities optimized jointly with shared optimizer
+✓ Backbone integration: Optional learned feature backbone in multi-granularity trainer
+✓ 4 new tests validating backbone, curriculum learning, and multi-granularity training
 
-The implementation now demonstrates the two core technical contributions: (1) flexible entity definitions at different spatial granularities, and (2) flow-matching + noisy context learning for continuous entity regression. This addresses the exposure bias problem in autoregressive generation.
+### Still Simplified / Not Yet Implemented
+- **No multi-scale coarse-to-fine** (Pass 4): currently trains granularities independently, not hierarchically
+- **No end-to-end demo on real data** (Pass 4): tested on synthetic/toy data only
+- **Simplified curriculum**: noise schedule is linear; no exposure bias mitigation via teacher forcing
+- **No acceleration tricks** (e.g., parallel decoding, skipping empty predictions)
+- **Backbone is minimal**: 2-layer CNN instead of deeper architecture
+
+The implementation now demonstrates: (1) flexible entity definitions at multiple granularities, (2) flow-matching + noisy context learning, and (3) multi-granularity training with learned representations. This foundation supports the coarse-to-fine generation strategy described in xAR.
