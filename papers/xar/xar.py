@@ -905,6 +905,316 @@ def test_multi_granularity_with_backbone():
     print(f"✓ Multi-granularity with backbone: patch loss {losses['patch'][0]:.4f} -> {losses['patch'][-1]:.4f}")
 
 
+class ToyImageDataset:
+    """Generate simple synthetic 32x32 images for Pass 4 demo."""
+
+    def __init__(self, num_images: int = 64, image_size: int = 32):
+        """
+        Args:
+            num_images: number of images to generate
+            image_size: size of square images (H=W)
+        """
+        self.num_images = num_images
+        self.image_size = image_size
+        self.images = self._generate_images()
+
+    def _generate_images(self) -> np.ndarray:
+        """Generate toy images: random rectangles and circles."""
+        images = []
+        for _ in range(self.num_images):
+            img = np.ones((self.image_size, self.image_size, 1), dtype=np.float32)
+
+            # Random rectangles
+            for _ in range(np.random.randint(1, 4)):
+                y1 = np.random.randint(0, self.image_size - 4)
+                x1 = np.random.randint(0, self.image_size - 4)
+                h = np.random.randint(2, 8)
+                w = np.random.randint(2, 8)
+                color = np.random.rand()
+                img[y1:y1 + h, x1:x1 + w, 0] = color
+
+            # Random circles (approximate with squares for simplicity)
+            for _ in range(np.random.randint(0, 3)):
+                cy = np.random.randint(4, self.image_size - 4)
+                cx = np.random.randint(4, self.image_size - 4)
+                r = np.random.randint(1, 4)
+                color = np.random.rand()
+                yy, xx = np.ogrid[:self.image_size, :self.image_size]
+                mask = (yy - cy) ** 2 + (xx - cx) ** 2 <= r ** 2
+                img[mask, 0] = color
+
+            images.append(img)
+
+        return np.array(images)
+
+    def __len__(self) -> int:
+        return len(self.images)
+
+    def __getitem__(self, idx: int) -> np.ndarray:
+        return self.images[idx]
+
+
+class EndToEndDemo:
+    """End-to-end xAR demonstration on toy dataset."""
+
+    def __init__(self, patch_size: int = 4, entity_dim: int = 16, hidden_dim: int = 64,
+                 num_heads: int = 2, num_layers: int = 1, device: str = 'cpu'):
+        """
+        Args:
+            patch_size: size of base patches
+            entity_dim: dimension of vectorized entities
+            hidden_dim: transformer hidden dimension
+            num_heads: attention heads
+            num_layers: transformer layers
+            device: 'cpu' or 'cuda'
+        """
+        self.patch_size = patch_size
+        self.entity_dim = entity_dim
+        self.device = device
+        self.converter = ImageToEntity(patch_size=patch_size)
+
+        # Multi-granularity trainer for 'patch' and 'cell' granularities
+        self.trainer = MultiGranularityARTrainer(
+            entity_dim=entity_dim,
+            granularities=['patch', 'cell'],
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            learning_rate=1e-3,
+            device=device,
+            use_backbone=False
+        )
+
+    def prepare_batch(self, images: np.ndarray) -> dict:
+        """
+        Convert batch of images to entity sequences.
+
+        Args:
+            images: shape (batch_size, H, W, C)
+
+        Returns:
+            granularity_entities: dict mapping granularity -> entities
+        """
+        batch_size = len(images)
+        all_patch_entities = []
+        all_cell_entities = []
+
+        for img in images:
+            patches = self.converter.image_to_patches(img)
+            num_h, num_w = patches.shape[0], patches.shape[1]
+
+            # Flatten patches into sequence
+            patch_entities = self.converter.vectorize_entity(patches, entity_type='patch')
+            all_patch_entities.append(patch_entities)
+
+            # Cell entities (2x2 grouped patches)
+            group_size = 2
+            if num_h % group_size == 0 and num_w % group_size == 0:
+                cell_entities = self.converter.vectorize_entity(
+                    patches, entity_type='cell', group_size=group_size
+                )
+            else:
+                # Fallback: use subsample if grid not divisible
+                cell_entities = self.converter.vectorize_entity(
+                    patches, entity_type='subsample', group_size=group_size
+                )
+            all_cell_entities.append(cell_entities)
+
+        # Pad sequences to same length
+        max_patch_len = max(len(e) for e in all_patch_entities)
+        max_cell_len = max(len(e) for e in all_cell_entities)
+
+        patch_seq = np.zeros((batch_size, max_patch_len, self.entity_dim), dtype=np.float32)
+        cell_seq = np.zeros((batch_size, max_cell_len, self.entity_dim), dtype=np.float32)
+
+        for i, (pe, ce) in enumerate(zip(all_patch_entities, all_cell_entities)):
+            # Pad or truncate to entity_dim
+            pe_padded = np.zeros((len(pe), self.entity_dim), dtype=np.float32)
+            pe_padded[:, :min(self.entity_dim, pe.shape[1])] = pe[:, :self.entity_dim]
+            patch_seq[i, :len(pe), :] = pe_padded
+
+            ce_padded = np.zeros((len(ce), self.entity_dim), dtype=np.float32)
+            ce_padded[:, :min(self.entity_dim, ce.shape[1])] = ce[:, :self.entity_dim]
+            cell_seq[i, :len(ce), :] = ce_padded
+
+        return {
+            'patch': patch_seq,
+            'cell': cell_seq
+        }
+
+    def train(self, dataset: ToyImageDataset, num_epochs: int = 100, batch_size: int = 16,
+              noise_std: float = 0.15, verbose: bool = True) -> Tuple[List[float], List[float]]:
+        """
+        Train on toy dataset.
+
+        Args:
+            dataset: ToyImageDataset instance
+            num_epochs: number of training epochs
+            batch_size: batch size for training
+            noise_std: noise standard deviation
+            verbose: whether to print progress
+
+        Returns:
+            patch_losses, cell_losses: training loss curves
+        """
+        patch_losses = []
+        cell_losses = []
+
+        for epoch in range(num_epochs):
+            epoch_patch_loss = 0.0
+            epoch_cell_loss = 0.0
+            num_batches = 0
+
+            for batch_start in range(0, len(dataset), batch_size):
+                batch_end = min(batch_start + batch_size, len(dataset))
+                batch_images = np.array([dataset[i] for i in range(batch_start, batch_end)])
+
+                entities = self.prepare_batch(batch_images)
+                losses = self.trainer.train_step(entities, noise_std=noise_std)
+
+                epoch_patch_loss += losses.get('patch', 0.0)
+                epoch_cell_loss += losses.get('cell', 0.0)
+                num_batches += 1
+
+            avg_patch_loss = epoch_patch_loss / max(1, num_batches)
+            avg_cell_loss = epoch_cell_loss / max(1, num_batches)
+            patch_losses.append(avg_patch_loss)
+            cell_losses.append(avg_cell_loss)
+
+            if verbose and (epoch + 1) % 20 == 0:
+                print(f"Epoch {epoch+1}/{num_epochs}: patch={avg_patch_loss:.4f}, cell={avg_cell_loss:.4f}")
+
+        return patch_losses, cell_losses
+
+    def generate_from_sample(self, sample_image: np.ndarray, granularity: str = 'patch',
+                            num_steps: int = 5) -> np.ndarray:
+        """
+        Generate image continuation from a sample.
+
+        Args:
+            sample_image: starting image, shape (H, W, C)
+            granularity: 'patch' or 'cell'
+            num_steps: autoregressive steps to generate
+
+        Returns:
+            generated_image: shape (H, W, C)
+        """
+        patches = self.converter.image_to_patches(sample_image)
+        patch_entities = self.converter.vectorize_entity(patches, entity_type='patch')
+
+        # Pad features to entity_dim
+        padded_entities = np.zeros((len(patch_entities), self.entity_dim), dtype=np.float32)
+        padded_entities[:, :patch_entities.shape[1]] = patch_entities
+
+        # Use first half of entities as context, generate rest
+        context_len = max(1, len(padded_entities) // 2)
+        context = padded_entities[:context_len]
+
+        # Pad to sequence length
+        max_len = len(padded_entities)
+        padded_context = np.zeros((1, max_len, self.entity_dim), dtype=np.float32)
+        padded_context[0, :context_len, :] = context
+
+        # Predict
+        predictions = self.trainer.predict(granularity, padded_context)
+
+        # Use predictions to fill remaining positions
+        generated_entities = padded_context[0].copy()
+        generated_entities[context_len:] = predictions[0, context_len:]
+
+        # Reconstruct image - truncate back to original entity dim for devectorize
+        original_entity_dim = patch_entities.shape[1]
+        truncated_entities = generated_entities[:, :original_entity_dim]
+
+        # Reconstruct image
+        num_h = patches.shape[0]
+        num_w = patches.shape[1]
+        reconstructed_patches = self.converter.devectorize_entity(
+            truncated_entities, num_patches_h=num_h, num_patches_w=num_w, entity_type='patch'
+        )
+        reconstructed_image = self.converter.patches_to_image(reconstructed_patches)
+
+        return reconstructed_image
+
+    def evaluate_reconstruction(self, dataset: ToyImageDataset, num_samples: int = 10) -> float:
+        """
+        Evaluate reconstruction error on test samples.
+
+        Args:
+            dataset: ToyImageDataset
+            num_samples: number of samples to evaluate
+
+        Returns:
+            mean_mse: mean squared error averaged over samples
+        """
+        total_mse = 0.0
+        for i in range(min(num_samples, len(dataset))):
+            original = dataset[i]
+            reconstructed = self.generate_from_sample(original, granularity='patch', num_steps=5)
+            mse = np.mean((original - reconstructed) ** 2)
+            total_mse += mse
+
+        return total_mse / max(1, min(num_samples, len(dataset)))
+
+
+def test_end_to_end_demo():
+    """Pass 4: End-to-end demo on toy dataset."""
+    print("\n=== Pass 4: End-to-End Demo on Toy Dataset ===")
+
+    # Create toy dataset
+    print("Generating toy dataset (64 32x32 images with random shapes)...")
+    dataset = ToyImageDataset(num_images=64, image_size=32)
+    print(f"✓ Dataset created: {len(dataset)} images of size {dataset.image_size}x{dataset.image_size}")
+
+    # Initialize end-to-end demo
+    print("Initializing xAR model...")
+    demo = EndToEndDemo(
+        patch_size=4,
+        entity_dim=64,
+        hidden_dim=64,
+        num_heads=2,
+        num_layers=1,
+        device='cpu'
+    )
+    print("✓ Model initialized with patch_size=4, entity_dim=64, hidden_dim=64")
+
+    # Train
+    print(f"Training for 50 epochs on batch_size=8...")
+    patch_losses, cell_losses = demo.train(
+        dataset,
+        num_epochs=50,
+        batch_size=8,
+        noise_std=0.15,
+        verbose=True
+    )
+    print(f"✓ Training complete")
+    print(f"  Patch loss: {patch_losses[0]:.4f} -> {patch_losses[-1]:.4f}")
+    print(f"  Cell loss:  {cell_losses[0]:.4f} -> {cell_losses[-1]:.4f}")
+
+    # Evaluate reconstruction
+    print("Evaluating reconstruction on 10 test samples...")
+    recon_mse = demo.evaluate_reconstruction(dataset, num_samples=10)
+    print(f"✓ Mean reconstruction MSE: {recon_mse:.4f}")
+
+    # Generate samples
+    print("Generating sample outputs...")
+    sample_idx = 0
+    original = dataset[sample_idx]
+    generated = demo.generate_from_sample(original, granularity='patch')
+    gen_mse = np.mean((original - generated) ** 2)
+    print(f"✓ Generated image MSE vs original: {gen_mse:.4f}")
+    print(f"  Original intensity range: [{original.min():.3f}, {original.max():.3f}]")
+    print(f"  Generated intensity range: [{generated.min():.3f}, {generated.max():.3f}]")
+
+    # Summary statistics
+    print("\n--- Training Summary ---")
+    print(f"Final patch loss:  {patch_losses[-1]:.4f} (decreased by {(1 - patch_losses[-1]/patch_losses[0])*100:.1f}%)")
+    print(f"Final cell loss:   {cell_losses[-1]:.4f} (decreased by {(1 - cell_losses[-1]/cell_losses[0])*100:.1f}%)")
+    print(f"Reconstruction MSE: {recon_mse:.4f}")
+
+    return patch_losses, cell_losses, recon_mse
+
+
 if __name__ == '__main__':
     print("=== Testing Pass 1 (Entity Abstraction) ===")
     test_basic_entity_conversion()
@@ -921,5 +1231,8 @@ if __name__ == '__main__':
     test_scheduled_curriculum_learning()
     test_multi_granularity_training()
     test_multi_granularity_with_backbone()
+
+    print("\n=== Testing Pass 4 (End-to-End Demo) ===")
+    test_end_to_end_demo()
 
     print("\n✓ All tests passed!")
