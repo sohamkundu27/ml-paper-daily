@@ -65,3 +65,23 @@ Demonstrate the full system on toy data with results:
 - Synthetic data uses simple Gaussian heatmaps (not SMPL rendering or real data)
 - No depth or normal head (Pass 2 adds multi-task outputs)
 
+### Pass 2 Complete
+
+✓ `MultiTaskPoseDepthNormal`: Model with three prediction heads on shared CNN backbone
+✓ `DepthHead`: Conv layers predicting per-pixel depth (1 channel)
+✓ `NormalHead`: Conv layers predicting per-pixel surface normals (3 channels, L2-normalized)
+✓ `create_synthetic_depth()`: Generate synthetic depth maps for training
+✓ `create_synthetic_normals()`: Generate synthetic surface normal maps with realistic variation
+✓ `MultiTaskLoss`: Combined loss function with separate components for keypoints (binary cross-entropy), depth (MSE), and normals (1 - cosine similarity)
+✓ `train_step()`: Single training iteration with backward pass and optimizer step
+✓ 8 comprehensive tests validating all three heads, loss computation, training, and gradient flow
+
+### Pass 2 Simplified/Stubbed
+
+- Depth and normal maps are synthetic with simple patterns (not from real SMPL renderings)
+- Normal head outputs L2-normalized vectors (no special handling for ambiguous normals)
+- Multi-task loss uses uniform weighting (1.0 for all tasks; could be tuned per task)
+- Training function is minimal (no learning rate scheduling, early stopping, or validation)
+- No evaluation metrics beyond loss values (no depth MAE, normal angle error, etc.)
+- Synthetic targets are fixed patterns rather than from a realistic dataset or differentiable render
+

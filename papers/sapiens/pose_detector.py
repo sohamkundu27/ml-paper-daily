@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import Tuple
+from typing import Tuple, Dict
 
 
 class SimpleCNNBackbone(nn.Module):
@@ -164,3 +164,201 @@ def create_synthetic_image_with_points(image_size: int = 256, num_points: int = 
                         image[ny, nx] = [50, 100, 200]
 
     return image, keypoints
+
+
+def create_synthetic_depth(image_size: int = 256, heatmap_size: int = 64) -> np.ndarray:
+    """Generate synthetic depth map for body
+
+    Returns:
+        depth: (heatmap_size, heatmap_size) depth values in [0.5, 2.0] meters
+    """
+    depth = np.ones((heatmap_size, heatmap_size), dtype=np.float32) * 1.5
+    center_y, center_x = heatmap_size // 2, heatmap_size // 2
+    for i in range(heatmap_size):
+        for j in range(heatmap_size):
+            dist = np.sqrt((i - center_y)**2 + (j - center_x)**2)
+            depth[i, j] = 1.5 + 0.3 * np.exp(-(dist**2) / (2 * 20**2))
+    return np.clip(depth, 0.5, 2.0)
+
+
+def create_synthetic_normals(image_size: int = 256, heatmap_size: int = 64) -> np.ndarray:
+    """Generate synthetic surface normal map for body
+
+    Returns:
+        normals: (heatmap_size, heatmap_size, 3) unit normal vectors
+    """
+    normals = np.zeros((heatmap_size, heatmap_size, 3), dtype=np.float32)
+    center_y, center_x = heatmap_size // 2, heatmap_size // 2
+
+    for i in range(heatmap_size):
+        for j in range(heatmap_size):
+            dist = np.sqrt((i - center_y)**2 + (j - center_x)**2)
+            angle = 2 * np.pi * dist / heatmap_size
+            nx = np.sin(angle)
+            ny = np.cos(angle)
+            nz = np.sqrt(max(0, 1 - nx**2 - ny**2))
+            normals[i, j] = np.array([nx, ny, nz])
+
+    return normals
+
+
+class MultiTaskPoseDepthNormal(nn.Module):
+    """Multi-task model predicting keypoints, depth, and normals"""
+    def __init__(self, num_keypoints: int = 17, image_size: int = 256):
+        """
+        Args:
+            num_keypoints: Number of body keypoints
+            image_size: Input image size
+        """
+        super().__init__()
+        self.num_keypoints = num_keypoints
+        self.image_size = image_size
+        self.heatmap_size = image_size // 4
+
+        self.backbone = SimpleCNNBackbone(input_channels=3, feature_channels=64)
+
+        self.heatmap_head = nn.Sequential(
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Conv2d(128, num_keypoints, kernel_size=1)
+        )
+
+        self.depth_head = nn.Sequential(
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 1, kernel_size=1)
+        )
+
+        self.normal_head = nn.Sequential(
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 3, kernel_size=1)
+        )
+
+    def forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            images: (B, 3, H, W) batch of images
+
+        Returns:
+            dict with keys:
+                'keypoints': (B, num_keypoints, heatmap_H, heatmap_W)
+                'depth': (B, 1, heatmap_H, heatmap_W)
+                'normals': (B, 3, heatmap_H, heatmap_W)
+        """
+        features = self.backbone(images)
+
+        heatmaps = self.heatmap_head(features)
+        depth = self.depth_head(features)
+        normals = self.normal_head(features)
+        normals = F.normalize(normals, p=2, dim=1)
+
+        return {
+            'keypoints': heatmaps,
+            'depth': depth,
+            'normals': normals
+        }
+
+    def get_keypoints_from_heatmaps(self, heatmaps: torch.Tensor) -> torch.Tensor:
+        """Extract (x, y) coordinates from heatmaps via argmax
+
+        Args:
+            heatmaps: (B, num_keypoints, H, W)
+
+        Returns:
+            keypoints: (B, num_keypoints, 2) in image space
+        """
+        B, K, H, W = heatmaps.shape
+        heatmaps_flat = heatmaps.view(B, K, -1)
+        indices = torch.argmax(heatmaps_flat, dim=2)
+
+        y_coords = indices // W
+        x_coords = indices % W
+
+        scale = self.image_size / H
+        keypoints = torch.stack([x_coords.float() * scale, y_coords.float() * scale], dim=2)
+        return keypoints
+
+
+class MultiTaskLoss(nn.Module):
+    """Combined loss for keypoint, depth, and normal prediction"""
+    def __init__(self, keypoint_weight: float = 1.0, depth_weight: float = 1.0,
+                 normal_weight: float = 1.0):
+        super().__init__()
+        self.keypoint_weight = keypoint_weight
+        self.depth_weight = depth_weight
+        self.normal_weight = normal_weight
+
+    def forward(self, predictions: Dict[str, torch.Tensor],
+                targets: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            predictions: dict with keys 'keypoints', 'depth', 'normals'
+            targets: dict with keys 'keypoints', 'depth', 'normals'
+
+        Returns:
+            dict with loss components and total loss
+        """
+        keypoint_loss = F.binary_cross_entropy_with_logits(
+            predictions['keypoints'], targets['keypoints']
+        )
+
+        depth_loss = F.mse_loss(predictions['depth'], targets['depth'])
+
+        normal_pred = predictions['normals']
+        normal_target = targets['normals']
+        normal_pred_norm = F.normalize(normal_pred, p=2, dim=1)
+        normal_target_norm = F.normalize(normal_target, p=2, dim=1)
+        normal_loss = 1.0 - torch.mean(torch.sum(normal_pred_norm * normal_target_norm, dim=1))
+
+        total_loss = (
+            self.keypoint_weight * keypoint_loss +
+            self.depth_weight * depth_loss +
+            self.normal_weight * normal_loss
+        )
+
+        return {
+            'total': total_loss,
+            'keypoint': keypoint_loss,
+            'depth': depth_loss,
+            'normal': normal_loss
+        }
+
+
+def train_step(model: MultiTaskPoseDepthNormal, optimizer: torch.optim.Optimizer,
+               images: torch.Tensor, targets: Dict[str, torch.Tensor],
+               loss_fn: MultiTaskLoss) -> Dict[str, float]:
+    """Perform one training step
+
+    Args:
+        model: Multi-task model
+        optimizer: Optimizer
+        images: (B, 3, H, W) batch of images
+        targets: dict with keys 'keypoints', 'depth', 'normals'
+        loss_fn: Loss function
+
+    Returns:
+        dict with loss components
+    """
+    model.train()
+    optimizer.zero_grad()
+
+    predictions = model(images)
+    losses = loss_fn(predictions, targets)
+
+    losses['total'].backward()
+    optimizer.step()
+
+    return {
+        'total': losses['total'].item(),
+        'keypoint': losses['keypoint'].item(),
+        'depth': losses['depth'].item(),
+        'normal': losses['normal'].item()
+    }
