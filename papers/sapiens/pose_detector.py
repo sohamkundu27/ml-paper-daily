@@ -362,3 +362,306 @@ def train_step(model: MultiTaskPoseDepthNormal, optimizer: torch.optim.Optimizer
         'depth': losses['depth'].item(),
         'normal': losses['normal'].item()
     }
+
+
+class SyntheticBodyDataset:
+    """Dataset that generates random synthetic human body samples on-the-fly"""
+    def __init__(self, num_samples: int = 100, image_size: int = 256,
+                 heatmap_size: int = 64, num_keypoints: int = 17):
+        self.num_samples = num_samples
+        self.image_size = image_size
+        self.heatmap_size = heatmap_size
+        self.num_keypoints = num_keypoints
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        image_np, keypoints_np = create_synthetic_image_with_points(
+            self.image_size, self.num_keypoints
+        )
+        heatmaps_np = points_to_heatmap(keypoints_np, self.image_size, self.heatmap_size)
+        depth_np = create_synthetic_depth(self.image_size, self.heatmap_size)
+        normals_np = create_synthetic_normals(self.image_size, self.heatmap_size)
+
+        image_tensor = torch.from_numpy(image_np).permute(2, 0, 1).float() / 255.0
+        heatmap_tensor = torch.from_numpy(heatmaps_np).float()
+        depth_tensor = torch.from_numpy(depth_np).unsqueeze(0).float()
+        normal_tensor = torch.from_numpy(normals_np).permute(2, 0, 1).float()
+
+        return {
+            'image': image_tensor,
+            'keypoints': heatmap_tensor,
+            'depth': depth_tensor,
+            'normals': normal_tensor
+        }
+
+
+def create_data_batch(dataset: SyntheticBodyDataset, batch_size: int,
+                     indices: np.ndarray) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Create a batch from dataset indices
+
+    Args:
+        dataset: SyntheticBodyDataset instance
+        batch_size: Size of batch
+        indices: Array of sample indices
+
+    Returns:
+        images batch and targets dict
+    """
+    images = []
+    keypoints_batch = []
+    depth_batch = []
+    normals_batch = []
+
+    for idx in indices:
+        sample = dataset[idx]
+        images.append(sample['image'])
+        keypoints_batch.append(sample['keypoints'])
+        depth_batch.append(sample['depth'])
+        normals_batch.append(sample['normals'])
+
+    images = torch.stack(images)
+    targets = {
+        'keypoints': torch.stack(keypoints_batch),
+        'depth': torch.stack(depth_batch),
+        'normals': torch.stack(normals_batch)
+    }
+
+    return images, targets
+
+
+def apply_data_augmentation(image: torch.Tensor, heatmaps: torch.Tensor,
+                           depth: torch.Tensor, normals: torch.Tensor,
+                           p_flip: float = 0.5, p_rotate: float = 0.3,
+                           max_brightness_delta: float = 0.1) -> Tuple:
+    """Apply data augmentation to a single sample
+
+    Args:
+        image: (3, H, W) image tensor
+        heatmaps: (K, H, W) keypoint heatmaps
+        depth: (1, H, W) depth map
+        normals: (3, H, W) normal map
+        p_flip: Probability of horizontal flip
+        p_rotate: Probability of rotation
+        max_brightness_delta: Max brightness change ([-delta, +delta])
+
+    Returns:
+        Augmented tensors
+    """
+    # Horizontal flip
+    if np.random.rand() < p_flip:
+        image = torch.flip(image, dims=[2])
+        heatmaps = torch.flip(heatmaps, dims=[2])
+        depth = torch.flip(depth, dims=[2])
+        normals = normals.clone()
+        normals[0] = -normals[0]
+        normals = torch.flip(normals, dims=[2])
+
+    # Random brightness
+    brightness_delta = np.random.uniform(-max_brightness_delta, max_brightness_delta)
+    image = torch.clamp(image + brightness_delta, 0.0, 1.0)
+
+    return image, heatmaps, depth, normals
+
+
+def compute_pck(pred_keypoints: np.ndarray, target_keypoints: np.ndarray,
+               threshold: float = 0.2, image_size: int = 256) -> float:
+    """Compute Percentage of Correct Keypoints (PCK)
+
+    Args:
+        pred_keypoints: (B, K, 2) predicted keypoints in image space
+        target_keypoints: (B, K, 2) target keypoints in image space
+        threshold: PCK threshold as fraction of image diagonal
+        image_size: Image size
+
+    Returns:
+        PCK score (0.0 to 1.0)
+    """
+    diagonal = np.sqrt(2) * image_size
+    pck_threshold = threshold * diagonal
+
+    distances = np.sqrt(np.sum((pred_keypoints - target_keypoints)**2, axis=2))
+    correct = (distances <= pck_threshold).astype(np.float32)
+    pck = np.mean(correct)
+
+    return pck
+
+
+def compute_depth_metrics(pred_depth: np.ndarray, target_depth: np.ndarray) -> Dict[str, float]:
+    """Compute depth prediction metrics
+
+    Args:
+        pred_depth: (B, 1, H, W) predicted depth
+        target_depth: (B, 1, H, W) target depth
+
+    Returns:
+        dict with 'mse' and 'mae'
+    """
+    pred_depth_flat = pred_depth.reshape(-1)
+    target_depth_flat = target_depth.reshape(-1)
+
+    mse = np.mean((pred_depth_flat - target_depth_flat) ** 2)
+    mae = np.mean(np.abs(pred_depth_flat - target_depth_flat))
+
+    return {'mse': mse, 'mae': mae}
+
+
+def compute_normal_metrics(pred_normals: np.ndarray, target_normals: np.ndarray) -> Dict[str, float]:
+    """Compute surface normal prediction metrics
+
+    Args:
+        pred_normals: (B, 3, H, W) predicted normals
+        target_normals: (B, 3, H, W) target normals
+
+    Returns:
+        dict with 'mae_angle' in degrees
+    """
+    B, C, H, W = pred_normals.shape
+
+    pred_normals_reshaped = pred_normals.reshape(B * H * W, 3)
+    target_normals_reshaped = target_normals.reshape(B * H * W, 3)
+
+    pred_normalized = pred_normals_reshaped / (np.linalg.norm(pred_normals_reshaped, axis=1, keepdims=True) + 1e-8)
+    target_normalized = target_normals_reshaped / (np.linalg.norm(target_normals_reshaped, axis=1, keepdims=True) + 1e-8)
+
+    dot_product = np.sum(pred_normalized * target_normalized, axis=1)
+    dot_product = np.clip(dot_product, -1.0, 1.0)
+    angles = np.arccos(dot_product) * 180.0 / np.pi
+    mae_angle = np.mean(angles)
+
+    return {'mae_angle': mae_angle}
+
+
+class Trainer:
+    """Training loop for multi-task pose, depth, and normal prediction"""
+    def __init__(self, model: MultiTaskPoseDepthNormal, optimizer: torch.optim.Optimizer,
+                 loss_fn: MultiTaskLoss, device: str = 'cpu'):
+        self.model = model
+        self.optimizer = optimizer
+        self.loss_fn = loss_fn
+        self.device = device
+        self.model.to(device)
+
+        self.train_losses = []
+        self.val_losses = []
+        self.metrics = []
+
+    def train_epoch(self, train_dataset: SyntheticBodyDataset, batch_size: int = 8) -> Dict[str, float]:
+        """Train for one epoch
+
+        Args:
+            train_dataset: Training dataset
+            batch_size: Batch size
+
+        Returns:
+            Average losses over epoch
+        """
+        self.model.train()
+        epoch_losses = {'total': 0.0, 'keypoint': 0.0, 'depth': 0.0, 'normal': 0.0}
+        num_batches = 0
+
+        indices = np.arange(len(train_dataset))
+        np.random.shuffle(indices)
+
+        for batch_start in range(0, len(train_dataset), batch_size):
+            batch_end = min(batch_start + batch_size, len(train_dataset))
+            batch_indices = indices[batch_start:batch_end]
+
+            images, targets = create_data_batch(train_dataset, batch_size, batch_indices)
+            images = images.to(self.device)
+            targets = {k: v.to(self.device) for k, v in targets.items()}
+
+            self.optimizer.zero_grad()
+            predictions = self.model(images)
+            losses = self.loss_fn(predictions, targets)
+
+            losses['total'].backward()
+            self.optimizer.step()
+
+            epoch_losses['total'] += losses['total'].item()
+            epoch_losses['keypoint'] += losses['keypoint'].item()
+            epoch_losses['depth'] += losses['depth'].item()
+            epoch_losses['normal'] += losses['normal'].item()
+            num_batches += 1
+
+        for key in epoch_losses:
+            epoch_losses[key] /= num_batches
+
+        self.train_losses.append(epoch_losses)
+        return epoch_losses
+
+    def validate(self, val_dataset: SyntheticBodyDataset, batch_size: int = 8) -> Tuple[Dict[str, float], Dict[str, float]]:
+        """Validate model on validation set
+
+        Args:
+            val_dataset: Validation dataset
+            batch_size: Batch size
+
+        Returns:
+            Validation losses and evaluation metrics
+        """
+        self.model.eval()
+        val_losses = {'total': 0.0, 'keypoint': 0.0, 'depth': 0.0, 'normal': 0.0}
+        num_batches = 0
+
+        all_keypoint_preds = []
+        all_keypoint_targets = []
+        all_depth_preds = []
+        all_depth_targets = []
+        all_normal_preds = []
+        all_normal_targets = []
+
+        with torch.no_grad():
+            for batch_start in range(0, len(val_dataset), batch_size):
+                batch_end = min(batch_start + batch_size, len(val_dataset))
+                batch_indices = np.arange(batch_start, batch_end)
+
+                images, targets = create_data_batch(val_dataset, batch_size, batch_indices)
+                images = images.to(self.device)
+                targets = {k: v.to(self.device) for k, v in targets.items()}
+
+                predictions = self.model(images)
+                losses = self.loss_fn(predictions, targets)
+
+                val_losses['total'] += losses['total'].item()
+                val_losses['keypoint'] += losses['keypoint'].item()
+                val_losses['depth'] += losses['depth'].item()
+                val_losses['normal'] += losses['normal'].item()
+
+                all_depth_preds.append(predictions['depth'].cpu().numpy())
+                all_depth_targets.append(targets['depth'].cpu().numpy())
+                all_normal_preds.append(predictions['normals'].cpu().numpy())
+                all_normal_targets.append(targets['normals'].cpu().numpy())
+
+                num_batches += 1
+
+        for key in val_losses:
+            val_losses[key] /= max(1, num_batches)
+
+        all_depth_preds = np.concatenate(all_depth_preds, axis=0)
+        all_depth_targets = np.concatenate(all_depth_targets, axis=0)
+        all_normal_preds = np.concatenate(all_normal_preds, axis=0)
+        all_normal_targets = np.concatenate(all_normal_targets, axis=0)
+
+        depth_metrics = compute_depth_metrics(all_depth_preds, all_depth_targets)
+        normal_metrics = compute_normal_metrics(all_normal_preds, all_normal_targets)
+
+        metrics = {
+            'depth_mse': depth_metrics['mse'],
+            'depth_mae': depth_metrics['mae'],
+            'normal_mae_angle': normal_metrics['mae_angle']
+        }
+
+        self.val_losses.append(val_losses)
+        self.metrics.append(metrics)
+
+        return val_losses, metrics
+
+    def get_training_history(self) -> Dict:
+        """Get full training history"""
+        return {
+            'train_losses': self.train_losses,
+            'val_losses': self.val_losses,
+            'metrics': self.metrics
+        }
