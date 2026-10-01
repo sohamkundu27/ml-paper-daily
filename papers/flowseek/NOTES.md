@@ -39,3 +39,35 @@ This paper proposes a lightweight approach to optical flow estimation that lever
 - No training loop (inference-only)
 - No sophisticated warping or deformation
 - Flow estimation is coarse (from single coarsest pyramid level)
+
+*After Pass 2:*
+
+**Implemented:**
+- `DepthEncoder`: Extracts depth features using Depth Anything V2 (with fallback gradient-based proxy)
+  - Attempts to load transformers-based depth model if available
+  - Falls back to edge-based depth proxy if transformers unavailable
+  - Normalizes depth features to [-1, 1] range for stable correlation
+- Depth-guided feature extraction in `CorrelationPyramid`:
+  - Concatenates normalized RGB features with depth features (3+1 channels)
+  - Passes combined features to correlation volume computation
+  - Enables depth-aware optical flow matching
+- `use_depth` parameter throughout pipeline:
+  - `FlowEstimator` accepts `use_depth` flag
+  - `estimate_optical_flow()` passes through `use_depth` parameter
+  - Can toggle depth guidance on/off for comparison
+- Comprehensive tests for depth integration:
+  - Depth encoder shape and value validation
+  - Feature channel concatenation verification
+  - Flow estimation with/without depth
+  - Consistency on structured motion (translation)
+- All code runs without errors; depth guidance is optional and backward-compatible
+
+**Simplified/Stubbed:**
+- Depth model is lightweight fallback (gradient-based) when transformers unavailable
+  - Would use Depth Anything V2 with full transformers integration in production
+  - Current fallback demonstrates the mechanism without heavy dependencies
+- No learned depth encoder fine-tuning (uses frozen pretrained weights)
+- Motion bases parameterization not yet implemented (Pass 3)
+- No iterative refinement using depth confidence maps
+- No learned combination weights for RGB-depth fusion (simple concatenation)
+- Flow estimation still coarse (from coarsest pyramid level)

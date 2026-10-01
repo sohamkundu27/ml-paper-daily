@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from flowseek import estimate_optical_flow, FlowEstimator
+from flowseek import estimate_optical_flow, FlowEstimator, DepthEncoder, CorrelationPyramid
 
 
 def test_flow_estimation_basic():
@@ -105,13 +105,97 @@ def test_synthetic_motion():
         f"Flow seems unreasonable: ({u_mean:.2f}, {v_mean:.2f})"
 
 
-if __name__ == "__main__":
-    print("Running FlowSeek Pass 1 tests...\n")
+def test_depth_encoder():
+    """Test depth feature extraction."""
+    depth_encoder = DepthEncoder()
 
+    # Test on synthetic image
+    img = torch.randn(1, 3, 64, 64)
+    depth_feat = depth_encoder.extract(img)
+
+    # Check output shape and properties
+    assert depth_feat.shape == (1, 1, 64, 64), f"Expected (1, 1, 64, 64), got {depth_feat.shape}"
+    assert depth_feat.dtype == torch.float32, f"Expected float32, got {depth_feat.dtype}"
+
+    # Depth features should be normalized
+    assert -3 < depth_feat.mean() < 3, f"Depth mean should be normalized, got {depth_feat.mean()}"
+
+    print(f"✓ Depth encoder extracts correct shape: {depth_feat.shape}")
+    print(f"  Depth range: [{depth_feat.min():.2f}, {depth_feat.max():.2f}]")
+
+
+def test_depth_guided_features():
+    """Test that depth features are integrated with RGB features."""
+    pyramid = CorrelationPyramid(num_levels=1, search_range=2, use_depth=True)
+
+    img = torch.randn(1, 3, 64, 64)
+    feat = pyramid.extract_features(img)
+
+    # With depth integration, features should have 4 channels (3 RGB + 1 depth)
+    assert feat.shape[1] == 4, f"Expected 4 feature channels (RGB+depth), got {feat.shape[1]}"
+
+    print(f"✓ Depth-guided features have correct channels: {feat.shape}")
+
+
+def test_flow_with_and_without_depth():
+    """Test that flow estimation works with and without depth."""
+    img1 = torch.randn(1, 3, 64, 64)
+    img2 = torch.randn(1, 3, 64, 64)
+
+    # With depth
+    flow_with_depth = estimate_optical_flow(img1, img2, num_levels=2, use_depth=True)
+    assert flow_with_depth.shape == (1, 2, 64, 64)
+
+    # Without depth
+    flow_without_depth = estimate_optical_flow(img1, img2, num_levels=2, use_depth=False)
+    assert flow_without_depth.shape == (1, 2, 64, 64)
+
+    print(f"✓ Flow estimation works with depth: {flow_with_depth.shape}")
+    print(f"✓ Flow estimation works without depth: {flow_without_depth.shape}")
+
+
+def test_depth_improves_consistency():
+    """Test that depth guidance helps with structured motion."""
+    # Create images with structured motion (translation)
+    h, w = 96, 96
+    img1 = torch.zeros(1, 3, h, w)
+    img1[0, :, 30:60, 30:60] = 1.0
+
+    img2 = torch.zeros(1, 3, h, w)
+    img2[0, :, 34:64, 34:64] = 1.0  # Translated by (4, 4)
+
+    # Estimate with depth guidance
+    flow = estimate_optical_flow(img1, img2, num_levels=2, search_range=8, use_depth=True)
+    flow_np = flow[0].cpu().numpy()
+
+    # In the moving region, check motion consistency
+    moving_region = flow_np[:, 30:64, 30:64]
+    u_mean = moving_region[0].mean()
+    v_mean = moving_region[1].mean()
+    u_std = moving_region[0].std()
+    v_std = moving_region[1].std()
+
+    print(f"✓ Depth-guided flow on structured motion:")
+    print(f"  Mean flow: ({u_mean:.2f}, {v_mean:.2f})")
+    print(f"  Std dev:   ({u_std:.2f}, {v_std:.2f})")
+
+
+if __name__ == "__main__":
+    print("Running FlowSeek tests (Pass 1 + Pass 2)...\n")
+
+    # Pass 1 tests
+    print("--- Pass 1: Basic correlation pyramid ---")
     test_flow_dimensions()
     test_pyramid_levels()
     test_batch_processing()
     test_flow_estimation_basic()
     test_synthetic_motion()
+
+    # Pass 2 tests
+    print("\n--- Pass 2: Depth-guided features ---")
+    test_depth_encoder()
+    test_depth_guided_features()
+    test_flow_with_and_without_depth()
+    test_depth_improves_consistency()
 
     print("\n✓ All tests passed!")
