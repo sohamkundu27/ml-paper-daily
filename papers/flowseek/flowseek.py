@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
 
 class DepthEncoder:
@@ -115,6 +115,171 @@ class DepthEncoder:
         return depth_feat
 
 
+class MotionBasis:
+    """Parameterize optical flow using low-dimensional motion models."""
+
+    def __init__(self, motion_type="affine"):
+        """
+        Initialize motion basis.
+
+        Args:
+            motion_type: Type of motion model ("translation", "affine", or "homography")
+        """
+        self.motion_type = motion_type
+        self.params = None
+
+        # Parameter counts for each motion type
+        self.param_counts = {
+            "translation": 2,      # u0, v0
+            "affine": 6,          # a0, a1, a2, b0, b1, b2
+            "homography": 8        # 8 parameters for projective transform
+        }
+
+    def fit(self, flow: torch.Tensor, weights: Optional[torch.Tensor] = None) -> Dict[str, float]:
+        """
+        Fit motion basis parameters to optical flow field.
+
+        Args:
+            flow: (b, 2, h, w) optical flow field
+            weights: (b, 1, h, w) per-pixel confidence weights (optional)
+
+        Returns:
+            params: Dictionary of fitted parameters
+        """
+        b, c, h, w = flow.shape
+
+        # Create coordinate grid
+        yy, xx = torch.meshgrid(torch.arange(h, dtype=flow.dtype, device=flow.device),
+                                 torch.arange(w, dtype=flow.dtype, device=flow.device),
+                                 indexing='ij')
+
+        if self.motion_type == "translation":
+            return self._fit_translation(flow, weights)
+        elif self.motion_type == "affine":
+            return self._fit_affine(flow, xx, yy, weights)
+        elif self.motion_type == "homography":
+            return self._fit_homography(flow, xx, yy, weights)
+        else:
+            raise ValueError(f"Unknown motion type: {self.motion_type}")
+
+    def _fit_translation(self, flow: torch.Tensor,
+                        weights: Optional[torch.Tensor] = None) -> Dict[str, float]:
+        """Fit simple translation model: u=u0, v=v0."""
+        # Average flow across image, weighted by confidence
+        if weights is not None:
+            weights_norm = weights / (weights.sum() + 1e-8)
+            u0 = (flow[:, 0:1] * weights_norm).sum()
+            v0 = (flow[:, 1:2] * weights_norm).sum()
+        else:
+            u0 = flow[:, 0].mean()
+            v0 = flow[:, 1].mean()
+
+        self.params = {"u0": float(u0), "v0": float(v0)}
+        return self.params
+
+    def _fit_affine(self, flow: torch.Tensor, xx: torch.Tensor, yy: torch.Tensor,
+                   weights: Optional[torch.Tensor] = None) -> Dict[str, float]:
+        """Fit affine motion model: u = a0 + a1*x + a2*y, v = b0 + b1*x + b2*y."""
+        b, c, h, w = flow.shape
+
+        # Build design matrix [1, x, y] for each pixel
+        ones = torch.ones_like(xx)
+
+        # Flatten coordinates
+        X = torch.stack([ones, xx, yy], dim=0).reshape(3, -1)  # (3, h*w)
+        u = flow[0, 0].reshape(-1)  # (h*w,)
+        v = flow[0, 1].reshape(-1)  # (h*w,)
+
+        # Optionally apply weights
+        if weights is not None:
+            w = weights[0, 0].reshape(-1)
+            w_sqrt = torch.sqrt(w + 1e-8)
+            X = X * w_sqrt.unsqueeze(0)
+            u = u * w_sqrt
+            v = v * w_sqrt
+
+        # Solve least squares: X^T * params = flow
+        # params = (X * X^T)^-1 * X * flow
+        XXT = X @ X.T
+        Xu = X @ u
+        Xv = X @ v
+
+        try:
+            params_u = torch.linalg.solve(XXT, Xu)
+            params_v = torch.linalg.solve(XXT, Xv)
+        except:
+            # Fall back to pseudo-inverse if solve fails
+            XXT_inv = torch.linalg.pinv(XXT)
+            params_u = XXT_inv @ Xu
+            params_v = XXT_inv @ Xv
+
+        self.params = {
+            "a0": float(params_u[0]), "a1": float(params_u[1]), "a2": float(params_u[2]),
+            "b0": float(params_v[0]), "b1": float(params_v[1]), "b2": float(params_v[2])
+        }
+        return self.params
+
+    def _fit_homography(self, flow: torch.Tensor, xx: torch.Tensor, yy: torch.Tensor,
+                       weights: Optional[torch.Tensor] = None) -> Dict[str, float]:
+        """Fit homography motion model (simplified: use affine as approximation)."""
+        # Homography fitting is complex; for pass 3, approximate with affine
+        return self._fit_affine(flow, xx, yy, weights)
+
+    def compute_motion_field(self, h: int, w: int, device: torch.device) -> torch.Tensor:
+        """
+        Compute synthetic motion field from fitted parameters.
+
+        Args:
+            h, w: Height and width of output field
+            device: Device to create tensor on
+
+        Returns:
+            flow: (1, 2, h, w) synthetic flow field from motion model
+        """
+        if self.params is None:
+            raise ValueError("Must fit parameters first")
+
+        yy, xx = torch.meshgrid(torch.arange(h, dtype=torch.float32, device=device),
+                                 torch.arange(w, dtype=torch.float32, device=device),
+                                 indexing='ij')
+
+        if self.motion_type == "translation":
+            u = torch.full_like(xx, self.params["u0"])
+            v = torch.full_like(yy, self.params["v0"])
+        elif self.motion_type == "affine":
+            u = (self.params["a0"] + self.params["a1"] * xx + self.params["a2"] * yy)
+            v = (self.params["b0"] + self.params["b1"] * xx + self.params["b2"] * yy)
+        elif self.motion_type == "homography":
+            # Approximate homography with affine
+            u = (self.params["a0"] + self.params["a1"] * xx + self.params["a2"] * yy)
+            v = (self.params["b0"] + self.params["b1"] * xx + self.params["b2"] * yy)
+        else:
+            raise ValueError(f"Unknown motion type: {self.motion_type}")
+
+        flow = torch.stack([u, v], dim=0).unsqueeze(0)
+        return flow
+
+    def regularize_flow(self, flow: torch.Tensor, strength: float = 0.5) -> torch.Tensor:
+        """
+        Regularize optical flow by blending with motion basis prediction.
+
+        Args:
+            flow: (b, 2, h, w) estimated optical flow
+            strength: Blending factor (0=no regularization, 1=full motion basis)
+
+        Returns:
+            regularized_flow: (b, 2, h, w) blended flow
+        """
+        b, c, h, w = flow.shape
+
+        # Compute motion field from fitted parameters
+        motion_field = self.compute_motion_field(h, w, flow.device)
+
+        # Blend estimated flow with motion field
+        regularized = flow * (1 - strength) + motion_field * strength
+        return regularized
+
+
 class CorrelationVolume:
     """Compute correlation volume for optical flow estimation."""
 
@@ -221,13 +386,17 @@ class CorrelationPyramid:
 
 
 class FlowEstimator:
-    """Optical flow estimator using depth-guided correlation pyramid."""
+    """Optical flow estimator with motion basis regularization."""
 
-    def __init__(self, num_levels=4, search_range=4, use_depth=True):
+    def __init__(self, num_levels=4, search_range=4, use_depth=True,
+                 motion_basis_type=None, motion_basis_strength=0.5):
         self.num_levels = num_levels
         self.search_range = search_range
         self.use_depth = use_depth
         self.pyramid = CorrelationPyramid(num_levels, search_range, use_depth=use_depth)
+        self.motion_basis_type = motion_basis_type
+        self.motion_basis_strength = motion_basis_strength
+        self.motion_basis = MotionBasis(motion_basis_type) if motion_basis_type else None
 
     def estimate(self, img1, img2):
         """
@@ -291,21 +460,32 @@ class FlowEstimator:
             flow = F.interpolate(flow, size=(h, w), mode='bilinear', align_corners=False)
             flow = flow * scale
 
+        # Apply motion basis regularization if enabled
+        if self.motion_basis is not None:
+            # Fit motion basis to the estimated flow
+            self.motion_basis.fit(flow)
+            # Regularize flow by blending with motion basis
+            flow = self.motion_basis.regularize_flow(flow, self.motion_basis_strength)
+
         return flow
 
 
-def estimate_optical_flow(img1, img2, num_levels=4, search_range=4, use_depth=True):
+def estimate_optical_flow(img1, img2, num_levels=4, search_range=4, use_depth=True,
+                         motion_basis_type=None, motion_basis_strength=0.5):
     """
-    Estimate optical flow between two images with optional depth guidance.
+    Estimate optical flow between two images with optional depth guidance and motion regularization.
 
     Args:
         img1, img2: Input images (numpy or tensor)
         num_levels: Number of pyramid levels
         search_range: Search range for correlation
         use_depth: Whether to use depth priors (Depth Anything V2)
+        motion_basis_type: Motion model type ("translation", "affine", "homography") or None
+        motion_basis_strength: Strength of motion basis regularization (0-1)
 
     Returns:
         flow: (b, 2, h, w) optical flow field
     """
-    estimator = FlowEstimator(num_levels=num_levels, search_range=search_range, use_depth=use_depth)
+    estimator = FlowEstimator(num_levels=num_levels, search_range=search_range, use_depth=use_depth,
+                             motion_basis_type=motion_basis_type, motion_basis_strength=motion_basis_strength)
     return estimator.estimate(img1, img2)

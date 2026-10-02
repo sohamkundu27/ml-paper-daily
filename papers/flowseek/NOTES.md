@@ -67,7 +67,42 @@ This paper proposes a lightweight approach to optical flow estimation that lever
   - Would use Depth Anything V2 with full transformers integration in production
   - Current fallback demonstrates the mechanism without heavy dependencies
 - No learned depth encoder fine-tuning (uses frozen pretrained weights)
-- Motion bases parameterization not yet implemented (Pass 3)
 - No iterative refinement using depth confidence maps
 - No learned combination weights for RGB-depth fusion (simple concatenation)
 - Flow estimation still coarse (from coarsest pyramid level)
+
+*After Pass 3:*
+
+**Implemented:**
+- `MotionBasis`: Low-dimensional motion parameterization with three models
+  - Translation: 2-parameter model (u0, v0) for uniform motion
+  - Affine: 6-parameter model (a0-a2, b0-b2) for linear motion variation
+  - Homography: 8-parameter approximated via affine (simplified for pass 3)
+- Motion basis fitting via least-squares optimization
+  - Fits parameters by solving X^T * params = flow equation
+  - Supports optional per-pixel confidence weighting
+  - Includes numerical stability via pseudo-inverse fallback
+- Motion field generation from fitted parameters
+  - Reconstructs synthetic flow field from motion model parameters
+  - Evaluates motion basis at any resolution
+- Flow regularization via motion basis blending
+  - Interpolates between raw estimated flow and motion-constrained field
+  - Configurable regularization strength (0=raw flow, 1=pure motion basis)
+- Integration into FlowEstimator pipeline
+  - `motion_basis_type` parameter selects model ("translation", "affine", or None)
+  - `motion_basis_strength` parameter controls regularization intensity
+  - Motion basis is fitted post-pyramid, applied before final return
+- Comprehensive Pass 3 test suite
+  - Translation basis fitting on pure translation
+  - Affine basis fitting on synthetic affine flow
+  - Motion field reconstruction validation
+  - Flow regularization smoothness verification
+  - End-to-end flow estimation with motion constraints
+
+**Simplified/Stubbed:**
+- Homography fitting approximated via affine (full projective transform omitted)
+- No iterative motion basis refinement (single pass fit-and-regularize)
+- No multi-basis voting or mixture-of-motions for segmented scenes
+- No confidence-weighted basis selection (all bases have equal treatment)
+- Motion bases treat entire image uniformly (no local/piecewise models)
+- Regularization is simple linear blending (no learned weighting)

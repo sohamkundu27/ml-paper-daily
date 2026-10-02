@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from flowseek import estimate_optical_flow, FlowEstimator, DepthEncoder, CorrelationPyramid
+from flowseek import estimate_optical_flow, FlowEstimator, DepthEncoder, CorrelationPyramid, MotionBasis
 
 
 def test_flow_estimation_basic():
@@ -180,8 +180,124 @@ def test_depth_improves_consistency():
     print(f"  Std dev:   ({u_std:.2f}, {v_std:.2f})")
 
 
+def test_motion_basis_translation():
+    """Test translation motion basis fitting."""
+    # Create flow field with pure translation
+    h, w = 64, 64
+    flow = torch.ones(1, 2, h, w) * torch.tensor([3.0, 2.0]).reshape(1, 2, 1, 1)
+
+    # Fit translation motion basis
+    mb = MotionBasis(motion_type="translation")
+    params = mb.fit(flow)
+
+    # Check parameters
+    assert "u0" in params and "v0" in params
+    assert abs(params["u0"] - 3.0) < 0.1, f"Expected u0≈3.0, got {params['u0']}"
+    assert abs(params["v0"] - 2.0) < 0.1, f"Expected v0≈2.0, got {params['v0']}"
+
+    print(f"✓ Translation basis fit: u0={params['u0']:.2f}, v0={params['v0']:.2f}")
+
+
+def test_motion_basis_affine():
+    """Test affine motion basis fitting."""
+    # Create synthetic affine flow field
+    h, w = 64, 64
+    yy, xx = torch.meshgrid(torch.arange(h), torch.arange(w), indexing='ij')
+
+    # Generate flow: u = 1 + 0.1*x + 0.05*y, v = 2 + 0.05*x + 0.1*y
+    u = 1.0 + 0.1 * xx.float() + 0.05 * yy.float()
+    v = 2.0 + 0.05 * xx.float() + 0.1 * yy.float()
+    flow = torch.stack([u, v], dim=0).unsqueeze(0)
+
+    # Fit affine motion basis
+    mb = MotionBasis(motion_type="affine")
+    params = mb.fit(flow)
+
+    # Check parameters (should match the synthetic flow)
+    assert abs(params["a0"] - 1.0) < 0.1, f"Expected a0≈1.0, got {params['a0']}"
+    assert abs(params["a1"] - 0.1) < 0.01, f"Expected a1≈0.1, got {params['a1']}"
+    assert abs(params["a2"] - 0.05) < 0.01, f"Expected a2≈0.05, got {params['a2']}"
+
+    print(f"✓ Affine basis fit: a0={params['a0']:.3f}, a1={params['a1']:.3f}, a2={params['a2']:.3f}")
+
+
+def test_motion_basis_compute():
+    """Test computing synthetic flow from fitted motion basis."""
+    # Create a simple translation flow
+    flow = torch.ones(1, 2, 32, 32) * torch.tensor([2.5, 1.5]).reshape(1, 2, 1, 1)
+
+    # Fit and reconstruct
+    mb = MotionBasis(motion_type="translation")
+    mb.fit(flow)
+
+    # Compute motion field from parameters
+    synthetic_flow = mb.compute_motion_field(32, 32, flow.device)
+
+    assert synthetic_flow.shape == (1, 2, 32, 32)
+    assert abs(synthetic_flow[0, 0].mean() - 2.5) < 0.1
+    assert abs(synthetic_flow[0, 1].mean() - 1.5) < 0.1
+
+    print(f"✓ Motion basis reconstruction: shape={synthetic_flow.shape}, mean_u={synthetic_flow[0, 0].mean():.2f}")
+
+
+def test_motion_basis_regularization():
+    """Test flow regularization with motion basis."""
+    # Create noisy flow
+    h, w = 64, 64
+    flow = torch.randn(1, 2, h, w) + torch.tensor([2.0, 1.0]).reshape(1, 2, 1, 1)
+
+    mb = MotionBasis(motion_type="translation")
+    mb.fit(flow)
+
+    # Regularize flow
+    regularized = mb.regularize_flow(flow, strength=0.8)
+
+    assert regularized.shape == flow.shape
+    # Regularized flow should be smoother (lower std in spatial variation)
+    spatial_std_original = flow[0].std(dim=(1, 2)).mean()
+    spatial_std_regularized = regularized[0].std(dim=(1, 2)).mean()
+
+    print(f"✓ Motion regularization: original_std={spatial_std_original:.2f}, regularized_std={spatial_std_regularized:.2f}")
+
+
+def test_flow_with_motion_basis():
+    """Test optical flow estimation with motion basis regularization."""
+    # Create synthetic rigid translation
+    h, w = 96, 96
+    img1 = torch.zeros(1, 1, h, w)
+    img1[0, 0, 30:60, 30:60] = 1.0
+
+    img2 = torch.zeros(1, 1, h, w)
+    img2[0, 0, 34:64, 34:64] = 1.0  # Translate by (4, 4)
+
+    # Estimate without motion basis
+    flow_raw = estimate_optical_flow(img1, img2, num_levels=2, search_range=8,
+                                     use_depth=False, motion_basis_type=None)
+
+    # Estimate with translation motion basis
+    flow_translation = estimate_optical_flow(img1, img2, num_levels=2, search_range=8,
+                                            use_depth=False, motion_basis_type="translation",
+                                            motion_basis_strength=0.7)
+
+    # Estimate with affine motion basis
+    flow_affine = estimate_optical_flow(img1, img2, num_levels=2, search_range=8,
+                                       use_depth=False, motion_basis_type="affine",
+                                       motion_basis_strength=0.7)
+
+    assert flow_raw.shape == (1, 2, h, w)
+    assert flow_translation.shape == (1, 2, h, w)
+    assert flow_affine.shape == (1, 2, h, w)
+
+    # Check that motion-constrained flows are less noisy (smaller spatial variation)
+    raw_var = flow_raw[0].var(dim=(1, 2)).mean()
+    trans_var = flow_translation[0].var(dim=(1, 2)).mean()
+    affine_var = flow_affine[0].var(dim=(1, 2)).mean()
+
+    print(f"✓ Flow with motion basis: raw_var={raw_var:.3f}, translation_var={trans_var:.3f}, affine_var={affine_var:.3f}")
+
+
 if __name__ == "__main__":
-    print("Running FlowSeek tests (Pass 1 + Pass 2)...\n")
+    print("Running FlowSeek tests (Pass 1 + Pass 2 + Pass 3)...\n")
 
     # Pass 1 tests
     print("--- Pass 1: Basic correlation pyramid ---")
@@ -197,5 +313,13 @@ if __name__ == "__main__":
     test_depth_guided_features()
     test_flow_with_and_without_depth()
     test_depth_improves_consistency()
+
+    # Pass 3 tests
+    print("\n--- Pass 3: Motion basis regularization ---")
+    test_motion_basis_translation()
+    test_motion_basis_affine()
+    test_motion_basis_compute()
+    test_motion_basis_regularization()
+    test_flow_with_motion_basis()
 
     print("\n✓ All tests passed!")
