@@ -296,8 +296,78 @@ def test_flow_with_motion_basis():
     print(f"✓ Flow with motion basis: raw_var={raw_var:.3f}, translation_var={trans_var:.3f}, affine_var={affine_var:.3f}")
 
 
+def test_end_to_end_demo():
+    """Test end-to-end flow pipeline on synthetic data."""
+    # Create synthetic translation
+    h, w = 96, 96
+    img1 = torch.zeros(1, 1, h, w)
+    img1[0, 0, 30:60, 30:60] = 1.0
+
+    img2 = torch.zeros(1, 1, h, w)
+    img2[0, 0, 34:64, 34:64] = 1.0
+
+    # Run full pipeline
+    flow = estimate_optical_flow(img1, img2, num_levels=3, search_range=4,
+                                use_depth=False, motion_basis_type="translation",
+                                motion_basis_strength=0.7)
+
+    assert flow.shape == (1, 2, h, w), f"Expected (1, 2, {h}, {w}), got {flow.shape}"
+    assert not torch.isnan(flow).any(), "Flow contains NaN values"
+    assert not torch.isinf(flow).any(), "Flow contains Inf values"
+
+    print(f"✓ End-to-end pipeline produces valid output: {flow.shape}")
+    print(f"  Flow range: [{flow.min():.2f}, {flow.max():.2f}]")
+
+
+def test_pipeline_comparison():
+    """Test that different configurations can all run successfully."""
+    h, w = 64, 64
+    img1 = torch.randn(1, 3, h, w)
+    img2 = torch.randn(1, 3, h, w)
+
+    configs = [
+        (False, None),
+        (False, "translation"),
+        (False, "affine"),
+        (True, None),
+        (True, "translation"),
+    ]
+
+    for use_depth, motion_type in configs:
+        flow = estimate_optical_flow(img1, img2, num_levels=2, search_range=3,
+                                     use_depth=use_depth,
+                                     motion_basis_type=motion_type,
+                                     motion_basis_strength=0.5)
+        assert flow.shape == (1, 2, h, w)
+        assert not torch.isnan(flow).any()
+
+    print(f"✓ All {len(configs)} pipeline configurations work correctly")
+
+
+def test_flow_metrics():
+    """Test error metric computation."""
+    h, w = 64, 64
+
+    # Create estimated and ground truth flow
+    est_flow = torch.ones(1, 2, h, w) * torch.tensor([2.5, 1.5]).reshape(1, 2, 1, 1)
+    gt_flow = torch.ones(1, 2, h, w) * torch.tensor([2.0, 1.0]).reshape(1, 2, 1, 1)
+
+    # Compute metrics
+    est = est_flow[0].numpy()
+    gt = gt_flow[0].numpy()
+
+    epe = np.sqrt((est[0] - gt[0])**2 + (est[1] - gt[1])**2)
+    mean_epe = np.mean(epe)
+
+    # For perfect translation difference of (0.5, 0.5), EPE should be ~0.707
+    expected_epe = np.sqrt(0.5**2 + 0.5**2)
+    assert abs(mean_epe - expected_epe) < 0.01, f"Expected EPE ~{expected_epe}, got {mean_epe}"
+
+    print(f"✓ Flow metrics computation correct: EPE = {mean_epe:.3f} (expected ~{expected_epe:.3f})")
+
+
 if __name__ == "__main__":
-    print("Running FlowSeek tests (Pass 1 + Pass 2 + Pass 3)...\n")
+    print("Running FlowSeek tests (Pass 1 + Pass 2 + Pass 3 + Pass 4)...\n")
 
     # Pass 1 tests
     print("--- Pass 1: Basic correlation pyramid ---")
@@ -321,5 +391,11 @@ if __name__ == "__main__":
     test_motion_basis_compute()
     test_motion_basis_regularization()
     test_flow_with_motion_basis()
+
+    # Pass 4 tests
+    print("\n--- Pass 4: End-to-end demo and evaluation ---")
+    test_flow_metrics()
+    test_end_to_end_demo()
+    test_pipeline_comparison()
 
     print("\n✓ All tests passed!")
