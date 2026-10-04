@@ -24,4 +24,14 @@ This paper addresses the problem that video understanding models often fail to e
 
 ## Implemented vs. simplified
 
-Pass 1 uses a frozen pre-trained ResNet-50 for frame features (no fine-tuning) and global average pooling for temporal aggregation. The learnable context tokens and video-conditional prompting are deferred to later passes. This focuses on validating the basic video encoding pipeline.
+### Pass 1
+Uses a simple 3-layer CNN for frame feature extraction (not pre-trained) and global average pooling for temporal aggregation. Learnable context tokens and video-conditional prompting are deferred to later passes. This validates the basic video encoding pipeline.
+
+### Pass 2
+Implements the core Temporal Contextualization (TC) mechanism:
+- **Learnable context tokens**: A set of learnable parameters that act as "summary" tokens for the video
+- **Multi-head cross-attention**: Context tokens attend to frame features to capture cross-frame relationships
+- **Context injection**: Each frame is enriched by combining its original feature with attention-weighted context information
+- **Residual connections and layer norm**: Standard Transformer components for stable training
+
+The implementation uses 4 context tokens by default and 8 attention heads. Context tokens are initialized randomly and learned during training. The attention mechanism shows that context tokens attend to diverse temporal positions, enabling global temporal awareness. Video-conditional prompting and CLIP integration are deferred to Pass 3.
