@@ -2,6 +2,7 @@
 
 Pass 1: Basic frame feature extraction and temporal pooling.
 Pass 2: Temporal contextualization with learnable context tokens.
+Pass 3: CLIP text integration and video-conditional prompting.
 """
 
 import torch
@@ -310,6 +311,192 @@ class TCClipPass2(nn.Module):
             "contextualized_features": contextualized_features,
             "context_tokens": tc_output["context_tokens"],
             "attention_weights": tc_output["attention_weights"],
+        }
+
+
+class SimpleTextEncoder(nn.Module):
+    """Simple text encoder for action class prompts."""
+
+    def __init__(self, vocab_size=10000, embedding_dim=512, output_dim=512):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.output_dim = output_dim
+        self.token_embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.position_embedding = nn.Embedding(77, embedding_dim)
+        self.encoder = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim * 2),
+            nn.ReLU(),
+            nn.Linear(embedding_dim * 2, output_dim)
+        )
+
+    def forward(self, token_ids, num_tokens=None):
+        """Encode token IDs to embeddings.
+
+        Args:
+            token_ids: Tensor of shape (B, seq_len) with token indices
+            num_tokens: Optional actual length of tokens (for variable-length sequences)
+
+        Returns:
+            Tensor of shape (B, output_dim) with text embeddings
+        """
+        B, seq_len = token_ids.shape
+        pos_ids = torch.arange(seq_len, device=token_ids.device).unsqueeze(0).expand(B, -1)
+
+        token_emb = self.token_embedding(token_ids)
+        pos_emb = self.position_embedding(pos_ids)
+
+        x = token_emb + pos_emb
+        if num_tokens is not None:
+            mask = torch.arange(seq_len, device=token_ids.device).unsqueeze(0) < num_tokens.unsqueeze(1)
+            x = x * mask.unsqueeze(-1).float()
+            text_embedding = x.sum(dim=1) / num_tokens.unsqueeze(1).float().clamp(min=1)
+        else:
+            text_embedding = x.mean(dim=1)
+
+        output = self.encoder(text_embedding)
+        return F.normalize(output, p=2, dim=1)
+
+
+class VideoConditionalPrompting(nn.Module):
+    """Generates context-aware text prompt embeddings based on video features."""
+
+    def __init__(self, feature_dim=512, prompt_dim=512, num_prompts=10):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.prompt_dim = prompt_dim
+        self.num_prompts = num_prompts
+
+        self.prompt_attention = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim),
+            nn.ReLU(),
+            nn.Linear(feature_dim, num_prompts)
+        )
+
+        self.prompt_projection = nn.Linear(feature_dim, prompt_dim)
+
+    def forward(self, video_features, base_prompts=None):
+        """Generate video-conditional prompt embeddings.
+
+        Args:
+            video_features: Tensor of shape (B, feature_dim) from video encoder
+            base_prompts: Optional tensor of shape (num_prompts, prompt_dim) with base prompt embeddings
+
+        Returns:
+            Dictionary with:
+              - 'conditional_prompts': (B, num_prompts, prompt_dim)
+              - 'prompt_weights': (B, num_prompts) - attention weights for prompts
+        """
+        B = video_features.shape[0]
+
+        prompt_weights = self.prompt_attention(video_features)
+        prompt_weights = F.softmax(prompt_weights, dim=1)
+
+        if base_prompts is not None:
+            conditional_prompts = torch.matmul(
+                prompt_weights.unsqueeze(1),
+                base_prompts.unsqueeze(0)
+            ).squeeze(1)
+            conditional_prompts = conditional_prompts.unsqueeze(1).expand(-1, self.num_prompts, -1)
+        else:
+            projection = self.prompt_projection(video_features)
+            conditional_prompts = projection.unsqueeze(1).expand(-1, self.num_prompts, -1)
+
+        return {
+            "conditional_prompts": conditional_prompts,
+            "prompt_weights": prompt_weights,
+        }
+
+
+class TCClipPass3(nn.Module):
+    """TC-CLIP Pass 3: Video-text alignment with video-conditional prompting."""
+
+    def __init__(
+        self,
+        feature_dim=512,
+        freeze_backbone=True,
+        aggregation="mean",
+        num_context_tokens=4,
+        num_heads=8,
+        vocab_size=10000,
+        num_action_classes=10,
+    ):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.num_action_classes = num_action_classes
+
+        self.video_encoder = TCClipPass2(
+            feature_dim=feature_dim,
+            freeze_backbone=freeze_backbone,
+            aggregation=aggregation,
+            num_context_tokens=num_context_tokens,
+            num_heads=num_heads,
+        )
+
+        self.text_encoder = SimpleTextEncoder(
+            vocab_size=vocab_size,
+            embedding_dim=feature_dim,
+            output_dim=feature_dim
+        )
+
+        self.video_conditional_prompting = VideoConditionalPrompting(
+            feature_dim=feature_dim,
+            prompt_dim=feature_dim,
+            num_prompts=num_action_classes
+        )
+
+        self.temperature = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, video_frames, action_token_ids=None):
+        """Process video and compute action classification scores.
+
+        Args:
+            video_frames: Tensor of shape (B, T, C, H, W)
+            action_token_ids: Optional tensor of shape (num_action_classes, seq_len) with action tokens
+
+        Returns:
+            Dictionary with:
+              - 'video_features': (B, feature_dim)
+              - 'action_logits': (B, num_action_classes) - raw alignment scores
+              - 'action_probs': (B, num_action_classes) - softmax probabilities
+              - 'conditional_prompts': (B, num_action_classes, feature_dim)
+              - Additional keys from video encoder
+        """
+        video_output = self.video_encoder(video_frames)
+        video_features = video_output["video_features"]
+
+        vcp_output = self.video_conditional_prompting(video_features)
+        conditional_prompts = vcp_output["conditional_prompts"]
+        prompt_weights = vcp_output["prompt_weights"]
+
+        weighted_context = (prompt_weights.unsqueeze(-1) * conditional_prompts).sum(dim=1)
+        refined_video_features = F.normalize(
+            video_features + 0.3 * weighted_context,
+            p=2, dim=1
+        )
+
+        if action_token_ids is not None:
+            action_embeddings = self.text_encoder(action_token_ids)
+        else:
+            action_embeddings = F.normalize(
+                torch.randn(self.num_action_classes, self.feature_dim, device=video_features.device),
+                p=2, dim=1
+            )
+
+        action_logits = torch.matmul(refined_video_features, action_embeddings.t()) * torch.exp(self.temperature)
+        action_probs = F.softmax(action_logits, dim=1)
+
+        return {
+            "video_features": video_features,
+            "refined_video_features": refined_video_features,
+            "action_logits": action_logits,
+            "action_probs": action_probs,
+            "action_embeddings": action_embeddings,
+            "conditional_prompts": conditional_prompts,
+            "prompt_weights": prompt_weights,
+            "frame_features": video_output["frame_features"],
+            "contextualized_features": video_output["contextualized_features"],
+            "context_tokens": video_output["context_tokens"],
+            "attention_weights": video_output["attention_weights"],
         }
 
 

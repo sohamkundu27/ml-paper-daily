@@ -35,3 +35,12 @@ Implements the core Temporal Contextualization (TC) mechanism:
 - **Residual connections and layer norm**: Standard Transformer components for stable training
 
 The implementation uses 4 context tokens by default and 8 attention heads. Context tokens are initialized randomly and learned during training. The attention mechanism shows that context tokens attend to diverse temporal positions, enabling global temporal awareness. Video-conditional prompting and CLIP integration are deferred to Pass 3.
+
+### Pass 3
+Implements video-text alignment and video-conditional prompting:
+- **SimpleTextEncoder**: A learned text encoder that maps tokenized action class descriptions to fixed-dimensional embeddings. Uses token embeddings, positional embeddings, and a 2-layer MLP for projection to the feature space.
+- **VideoConditionalPrompting**: Generates action-specific prompt embeddings based on video context. Uses multi-head soft attention to compute adaptive weights over action classes, enabling the model to focus on relevant actions given the video content.
+- **Refined video features**: The conditional prompts are weighted-combined and used to refine the video features (residual connection), allowing video context to modulate the feature representation.
+- **Action classification**: Computes similarity scores between refined video features and action embeddings using normalized dot-product (cosine similarity), with a learnable temperature parameter for scaling.
+
+The implementation enables zero-shot and few-shot action classification by aligning video understanding with language-based action descriptions. Gradients flow through all components, enabling end-to-end training. The video-conditional prompting module specifically learns to generate action-aware refinements of video features.

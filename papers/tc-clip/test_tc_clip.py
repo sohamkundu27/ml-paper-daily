@@ -1,12 +1,15 @@
-"""Test suite for TC-CLIP Pass 1 and Pass 2."""
+"""Test suite for TC-CLIP Pass 1, Pass 2, and Pass 3."""
 
 import torch
 import numpy as np
 from tc_clip import (
     TCClipPass1,
     TCClipPass2,
+    TCClipPass3,
     ContextTokenGenerator,
     TemporalContextualizer,
+    SimpleTextEncoder,
+    VideoConditionalPrompting,
     get_video_transforms,
 )
 
@@ -239,6 +242,186 @@ def test_pass2_gradient_flow():
     print("✓ Pass 2 gradient flow test passed")
 
 
+def test_simple_text_encoder():
+    """Test SimpleTextEncoder produces correct output shapes."""
+    batch_size, seq_len, feature_dim = 2, 10, 512
+    vocab_size = 5000
+
+    encoder = SimpleTextEncoder(vocab_size=vocab_size, embedding_dim=feature_dim, output_dim=feature_dim)
+    token_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
+
+    encoder.eval()
+    with torch.no_grad():
+        text_embeddings = encoder(token_ids)
+
+    assert text_embeddings.shape == (batch_size, feature_dim), \
+        f"Expected shape ({batch_size}, {feature_dim}), got {text_embeddings.shape}"
+    assert torch.allclose(torch.norm(text_embeddings, p=2, dim=1), torch.ones(batch_size)), \
+        "Text embeddings should be normalized"
+    print("✓ SimpleTextEncoder test passed")
+
+
+def test_video_conditional_prompting():
+    """Test VideoConditionalPrompting generates context-aware prompts."""
+    batch_size, feature_dim, num_prompts = 2, 512, 10
+    video_features = torch.randn(batch_size, feature_dim)
+
+    vcp = VideoConditionalPrompting(
+        feature_dim=feature_dim,
+        prompt_dim=feature_dim,
+        num_prompts=num_prompts
+    )
+    vcp.eval()
+
+    with torch.no_grad():
+        output = vcp(video_features)
+
+    assert "conditional_prompts" in output, "Missing 'conditional_prompts'"
+    assert "prompt_weights" in output, "Missing 'prompt_weights'"
+
+    conditional_prompts = output["conditional_prompts"]
+    prompt_weights = output["prompt_weights"]
+
+    assert conditional_prompts.shape == (batch_size, num_prompts, feature_dim), \
+        f"Expected shape ({batch_size}, {num_prompts}, {feature_dim}), got {conditional_prompts.shape}"
+    assert prompt_weights.shape == (batch_size, num_prompts), \
+        f"Expected weights shape ({batch_size}, {num_prompts}), got {prompt_weights.shape}"
+
+    assert torch.allclose(prompt_weights.sum(dim=1), torch.ones(batch_size)), \
+        "Prompt weights should sum to 1 (softmax)"
+
+    print("✓ VideoConditionalPrompting test passed")
+
+
+def test_pass3_pipeline():
+    """Test the full TC-CLIP Pass 3 pipeline end-to-end."""
+    batch_size, num_frames, feature_dim = 2, 8, 512
+    num_action_classes = 5
+    video = create_synthetic_video(batch_size=batch_size, num_frames=num_frames)
+
+    model = TCClipPass3(
+        feature_dim=feature_dim,
+        freeze_backbone=True,
+        aggregation="mean",
+        num_context_tokens=4,
+        num_heads=8,
+        vocab_size=5000,
+        num_action_classes=num_action_classes,
+    )
+    model.eval()
+
+    with torch.no_grad():
+        output = model(video)
+
+    assert "video_features" in output, "Missing 'video_features'"
+    assert "action_logits" in output, "Missing 'action_logits'"
+    assert "action_probs" in output, "Missing 'action_probs'"
+    assert "action_embeddings" in output, "Missing 'action_embeddings'"
+    assert "conditional_prompts" in output, "Missing 'conditional_prompts'"
+
+    assert output["video_features"].shape == (batch_size, feature_dim)
+    assert output["action_logits"].shape == (batch_size, num_action_classes)
+    assert output["action_probs"].shape == (batch_size, num_action_classes)
+    assert output["action_embeddings"].shape == (num_action_classes, feature_dim)
+
+    assert torch.allclose(output["action_probs"].sum(dim=1), torch.ones(batch_size)), \
+        "Action probabilities should sum to 1"
+
+    print("✓ Pass 3 full pipeline test passed")
+
+
+def test_pass3_with_action_tokens():
+    """Test Pass 3 with explicit action token embeddings."""
+    batch_size, num_frames, feature_dim = 2, 8, 512
+    num_action_classes = 3
+    seq_len = 10
+    vocab_size = 5000
+
+    video = create_synthetic_video(batch_size=batch_size, num_frames=num_frames)
+    action_token_ids = torch.randint(0, vocab_size, (num_action_classes, seq_len))
+
+    model = TCClipPass3(
+        feature_dim=feature_dim,
+        freeze_backbone=True,
+        aggregation="mean",
+        num_context_tokens=4,
+        num_heads=8,
+        vocab_size=vocab_size,
+        num_action_classes=num_action_classes,
+    )
+    model.eval()
+
+    with torch.no_grad():
+        output = model(video, action_token_ids=action_token_ids)
+
+    assert output["action_embeddings"].shape == (num_action_classes, feature_dim)
+    assert output["action_logits"].shape == (batch_size, num_action_classes)
+
+    embeddings = output["action_embeddings"]
+    assert torch.allclose(torch.norm(embeddings, p=2, dim=1), torch.ones(num_action_classes)), \
+        "Action embeddings should be normalized"
+
+    print("✓ Pass 3 with action tokens test passed")
+
+
+def test_pass3_action_classification():
+    """Test that Pass 3 can distinguish between different actions."""
+    batch_size, num_frames, feature_dim = 4, 8, 256
+    num_action_classes = 4
+
+    model = TCClipPass3(
+        feature_dim=feature_dim,
+        freeze_backbone=True,
+        aggregation="mean",
+        num_context_tokens=4,
+        num_heads=4,
+        vocab_size=1000,
+        num_action_classes=num_action_classes,
+    )
+    model.eval()
+
+    videos = []
+    for i in range(batch_size):
+        video = create_synthetic_video(batch_size=1, num_frames=num_frames)
+        videos.append(video)
+    videos = torch.cat(videos, dim=0)
+
+    with torch.no_grad():
+        output = model(videos)
+
+    action_probs = output["action_probs"]
+    predictions = action_probs.argmax(dim=1)
+
+    assert predictions.shape == (batch_size,), f"Expected predictions shape ({batch_size},), got {predictions.shape}"
+    assert (predictions >= 0).all() and (predictions < num_action_classes).all(), \
+        "Predictions should be valid action class indices"
+
+    print("✓ Pass 3 action classification test passed")
+
+
+def test_pass3_gradient_flow():
+    """Test that gradients flow through video-conditional prompting in Pass 3."""
+    batch_size, num_frames = 2, 8
+    video = create_synthetic_video(batch_size=batch_size, num_frames=num_frames)
+
+    model = TCClipPass3(
+        feature_dim=512,
+        freeze_backbone=False,
+        aggregation="mean",
+        num_action_classes=5
+    )
+    model.train()
+
+    output = model(video)
+    loss = output["action_probs"].sum()
+    loss.backward()
+
+    has_gradients = any(p.grad is not None for p in model.video_conditional_prompting.parameters())
+    assert has_gradients, "Video-conditional prompting should have gradients"
+
+    print("✓ Pass 3 gradient flow test passed")
+
+
 if __name__ == "__main__":
     print("Running TC-CLIP Pass 1 tests...\n")
 
@@ -255,5 +438,14 @@ if __name__ == "__main__":
     test_context_attention_diversity()
     test_pass2_pipeline()
     test_pass2_gradient_flow()
+
+    print("\nRunning TC-CLIP Pass 3 tests...\n")
+
+    test_simple_text_encoder()
+    test_video_conditional_prompting()
+    test_pass3_pipeline()
+    test_pass3_with_action_tokens()
+    test_pass3_action_classification()
+    test_pass3_gradient_flow()
 
     print("\n✅ All tests passed!")
