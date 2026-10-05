@@ -1,4 +1,4 @@
-"""Test suite for TC-CLIP Pass 1, Pass 2, and Pass 3."""
+"""Test suite for TC-CLIP Pass 1, Pass 2, Pass 3, and Pass 4."""
 
 import torch
 import numpy as np
@@ -6,6 +6,8 @@ from tc_clip import (
     TCClipPass1,
     TCClipPass2,
     TCClipPass3,
+    TCClipPass4,
+    ToyActionDataset,
     ContextTokenGenerator,
     TemporalContextualizer,
     SimpleTextEncoder,
@@ -422,6 +424,153 @@ def test_pass3_gradient_flow():
     print("✓ Pass 3 gradient flow test passed")
 
 
+def test_toy_action_dataset():
+    """Test ToyActionDataset generates correct video shapes and labels."""
+    num_samples, num_actions, num_frames = 20, 5, 8
+    height, width, channels = 64, 64, 3
+
+    dataset = ToyActionDataset(
+        num_samples=num_samples,
+        num_actions=num_actions,
+        num_frames=num_frames,
+        height=height,
+        width=width,
+        channels=channels,
+        seed=42,
+    )
+
+    batch_videos, batch_labels = dataset.get_batch(batch_size=4)
+
+    assert batch_videos.shape == (4, num_frames, channels, height, width), \
+        f"Expected video shape (4, {num_frames}, {channels}, {height}, {width}), got {batch_videos.shape}"
+    assert batch_labels.shape == (4,), f"Expected labels shape (4,), got {batch_labels.shape}"
+    assert (batch_labels >= 0).all() and (batch_labels < num_actions).all(), \
+        "Labels should be in range [0, num_actions)"
+    assert torch.all(batch_videos >= 0) and torch.all(batch_videos <= 1), \
+        "Video frames should be in range [0, 1]"
+
+    print("✓ ToyActionDataset test passed")
+
+
+def test_toy_action_dataset_per_action():
+    """Test ToyActionDataset can generate specific action videos."""
+    dataset = ToyActionDataset(
+        num_samples=10,
+        num_actions=5,
+        num_frames=8,
+        height=64,
+        width=64,
+        seed=42,
+    )
+
+    for action_id in range(5):
+        videos, labels = dataset.get_batch(batch_size=2, action_id=action_id)
+        assert videos.shape == (2, 8, 3, 64, 64), \
+            f"Expected video shape for action {action_id}"
+        assert (labels == action_id).all(), \
+            f"All labels should be {action_id}"
+
+    print("✓ ToyActionDataset per-action test passed")
+
+
+def test_pass4_pipeline():
+    """Test the full TC-CLIP Pass 4 pipeline end-to-end."""
+    batch_size, num_frames, feature_dim = 2, 8, 256
+    num_action_classes = 5
+    video = create_synthetic_video(batch_size=batch_size, num_frames=num_frames, height=64, width=64)
+
+    model = TCClipPass4(
+        feature_dim=feature_dim,
+        freeze_backbone=True,
+        aggregation="mean",
+        num_context_tokens=4,
+        num_heads=4,
+        vocab_size=5000,
+        num_action_classes=num_action_classes,
+    )
+    model.eval()
+
+    with torch.no_grad():
+        output = model(video)
+
+    assert "video_features" in output, "Missing 'video_features'"
+    assert "action_logits" in output, "Missing 'action_logits'"
+    assert "action_probs" in output, "Missing 'action_probs'"
+
+    assert output["video_features"].shape == (batch_size, feature_dim)
+    assert output["action_logits"].shape == (batch_size, num_action_classes)
+    assert output["action_probs"].shape == (batch_size, num_action_classes)
+
+    print("✓ Pass 4 full pipeline test passed")
+
+
+def test_pass4_predict():
+    """Test Pass 4 prediction interface."""
+    batch_size, num_frames, feature_dim = 2, 8, 256
+    num_action_classes = 5
+    video = create_synthetic_video(batch_size=batch_size, num_frames=num_frames, height=64, width=64)
+
+    model = TCClipPass4(
+        feature_dim=feature_dim,
+        freeze_backbone=True,
+        num_action_classes=num_action_classes,
+    )
+    model.eval()
+
+    predictions, confidences = model.predict(video)
+
+    assert predictions.shape == (batch_size,), \
+        f"Expected predictions shape ({batch_size},), got {predictions.shape}"
+    assert confidences.shape == (batch_size,), \
+        f"Expected confidences shape ({batch_size},), got {confidences.shape}"
+    assert (predictions >= 0).all() and (predictions < num_action_classes).all(), \
+        "Predictions should be valid action class indices"
+    assert torch.all(confidences >= 0) and torch.all(confidences <= 1), \
+        "Confidences should be in [0, 1]"
+
+    print("✓ Pass 4 predict test passed")
+
+
+def test_pass4_trainable_params():
+    """Test Pass 4 can identify trainable parameters."""
+    model = TCClipPass4(
+        feature_dim=256,
+        freeze_backbone=False,
+        num_action_classes=5,
+    )
+
+    trainable_params = model.get_learnable_parameters()
+    assert len(trainable_params) > 0, "Should have trainable parameters with freeze_backbone=False"
+
+    num_trainable = sum(p.numel() for p in trainable_params)
+    assert num_trainable > 0, "Should have non-zero trainable parameters"
+
+    print("✓ Pass 4 trainable params test passed")
+
+
+def test_pass4_gradient_flow():
+    """Test that gradients flow through Pass 4."""
+    batch_size, num_frames = 2, 8
+    video = create_synthetic_video(batch_size=batch_size, num_frames=num_frames, height=64, width=64)
+    labels = torch.randint(0, 5, (batch_size,))
+
+    model = TCClipPass4(
+        feature_dim=256,
+        freeze_backbone=False,
+        num_action_classes=5,
+    )
+    model.train()
+
+    output = model(video)
+    loss = torch.nn.functional.cross_entropy(output["action_logits"], labels)
+    loss.backward()
+
+    has_gradients = any(p.grad is not None for p in model.get_learnable_parameters())
+    assert has_gradients, "Should have gradients flowing through trainable parameters"
+
+    print("✓ Pass 4 gradient flow test passed")
+
+
 if __name__ == "__main__":
     print("Running TC-CLIP Pass 1 tests...\n")
 
@@ -447,5 +596,14 @@ if __name__ == "__main__":
     test_pass3_with_action_tokens()
     test_pass3_action_classification()
     test_pass3_gradient_flow()
+
+    print("\nRunning TC-CLIP Pass 4 tests...\n")
+
+    test_toy_action_dataset()
+    test_toy_action_dataset_per_action()
+    test_pass4_pipeline()
+    test_pass4_predict()
+    test_pass4_trainable_params()
+    test_pass4_gradient_flow()
 
     print("\n✅ All tests passed!")

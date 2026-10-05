@@ -3,12 +3,14 @@
 Pass 1: Basic frame feature extraction and temporal pooling.
 Pass 2: Temporal contextualization with learnable context tokens.
 Pass 3: CLIP text integration and video-conditional prompting.
+Pass 4: End-to-end demo with synthetic action recognition.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import numpy as np
 
 
 class SimpleConvEncoder(nn.Module):
@@ -510,3 +512,172 @@ def get_video_transforms(image_size=224):
         return video * 2.0 - 1.0
 
     return normalize
+
+
+class TCClipPass4(nn.Module):
+    """TC-CLIP Pass 4: End-to-end demo with synthetic video evaluation."""
+
+    def __init__(
+        self,
+        feature_dim=256,
+        freeze_backbone=True,
+        aggregation="mean",
+        num_context_tokens=4,
+        num_heads=8,
+        vocab_size=5000,
+        num_action_classes=5,
+    ):
+        super().__init__()
+        self.model = TCClipPass3(
+            feature_dim=feature_dim,
+            freeze_backbone=freeze_backbone,
+            aggregation=aggregation,
+            num_context_tokens=num_context_tokens,
+            num_heads=num_heads,
+            vocab_size=vocab_size,
+            num_action_classes=num_action_classes,
+        )
+        self.num_action_classes = num_action_classes
+        self.feature_dim = feature_dim
+
+    def forward(self, video_frames, action_token_ids=None):
+        """Process video and compute action predictions.
+
+        Args:
+            video_frames: Tensor of shape (B, T, C, H, W)
+            action_token_ids: Optional tensor of shape (num_action_classes, seq_len)
+
+        Returns:
+            Dictionary with predictions and confidence scores
+        """
+        output = self.model(video_frames, action_token_ids=action_token_ids)
+        return output
+
+    def predict(self, video_frames, action_token_ids=None):
+        """Get class predictions from videos.
+
+        Args:
+            video_frames: Tensor of shape (B, T, C, H, W)
+            action_token_ids: Optional action token embeddings
+
+        Returns:
+            Tuple of (predicted_classes, confidence_scores) both shape (B,)
+        """
+        with torch.no_grad():
+            output = self.forward(video_frames, action_token_ids=action_token_ids)
+            action_probs = output["action_probs"]
+            predicted_classes = action_probs.argmax(dim=1)
+            confidence_scores = action_probs.max(dim=1)[0]
+        return predicted_classes, confidence_scores
+
+    def get_learnable_parameters(self):
+        """Get parameters that are trainable."""
+        return [p for p in self.parameters() if p.requires_grad]
+
+
+class ToyActionDataset:
+    """Generates synthetic videos with simple motion patterns as action classes."""
+
+    def __init__(
+        self,
+        num_samples=100,
+        num_actions=5,
+        num_frames=8,
+        height=64,
+        width=64,
+        channels=3,
+        seed=42,
+    ):
+        self.num_samples = num_samples
+        self.num_actions = num_actions
+        self.num_frames = num_frames
+        self.height = height
+        self.width = width
+        self.channels = channels
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
+    def generate_action_video(self, action_id):
+        """Generate a synthetic video for a specific action.
+
+        Actions are encoded as different motion patterns:
+        - Action 0: Horizontal motion (left-right)
+        - Action 1: Vertical motion (up-down)
+        - Action 2: Diagonal motion
+        - Action 3: Circular motion
+        - Action 4: Static with color variation
+        """
+        video = torch.zeros(self.num_frames, self.channels, self.height, self.width)
+
+        for t in range(self.num_frames):
+            frame = torch.ones(self.channels, self.height, self.width) * 0.5
+            x_center = self.width // 2
+            y_center = self.height // 2
+
+            if action_id == 0:
+                x = int(x_center + 10 * np.sin(2 * np.pi * t / self.num_frames))
+                if 5 <= x < self.width - 5:
+                    frame[:, y_center - 5:y_center + 5, x - 5:x + 5] = 1.0
+
+            elif action_id == 1:
+                y = int(y_center + 10 * np.sin(2 * np.pi * t / self.num_frames))
+                if 5 <= y < self.height - 5:
+                    frame[:, y - 5:y + 5, x_center - 5:x_center + 5] = 1.0
+
+            elif action_id == 2:
+                x = int(x_center + 8 * np.sin(2 * np.pi * t / self.num_frames))
+                y = int(y_center + 8 * np.cos(2 * np.pi * t / self.num_frames))
+                if 5 <= x < self.width - 5 and 5 <= y < self.height - 5:
+                    frame[:, y - 5:y + 5, x - 5:x + 5] = 1.0
+
+            elif action_id == 3:
+                theta = 2 * np.pi * t / self.num_frames
+                x = int(x_center + 12 * np.cos(theta))
+                y = int(y_center + 12 * np.sin(theta))
+                if 5 <= x < self.width - 5 and 5 <= y < self.height - 5:
+                    frame[:, y - 4:y + 4, x - 4:x + 4] = 1.0
+
+            else:
+                color_factor = 0.5 + 0.3 * t / self.num_frames
+                frame[:, 10:self.height - 10, 10:self.width - 10] = color_factor
+
+            video[t] = frame
+
+        video = torch.clamp(video, 0, 1)
+        return video
+
+    def __iter__(self):
+        """Generate dataset by yielding (video, action_label) tuples."""
+        samples_per_action = self.num_samples // self.num_actions
+        for action_id in range(self.num_actions):
+            for _ in range(samples_per_action):
+                video = self.generate_action_video(action_id)
+                yield video, action_id
+
+    def get_batch(self, batch_size=4, action_id=None):
+        """Get a batch of videos.
+
+        Args:
+            batch_size: Number of videos per batch
+            action_id: If specified, only generate videos for this action
+
+        Returns:
+            Tuple of (videos, labels) both batched
+        """
+        if action_id is not None:
+            videos = []
+            labels = []
+            for _ in range(batch_size):
+                video = self.generate_action_video(action_id)
+                videos.append(video)
+                labels.append(action_id)
+            return torch.stack(videos), torch.tensor(labels)
+        else:
+            videos = []
+            labels = []
+            for _ in range(batch_size):
+                aid = np.random.randint(0, self.num_actions)
+                video = self.generate_action_video(aid)
+                videos.append(video)
+                labels.append(aid)
+            return torch.stack(videos), torch.tensor(labels)
