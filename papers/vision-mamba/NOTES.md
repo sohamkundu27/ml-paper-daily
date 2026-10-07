@@ -23,10 +23,20 @@ Vision Mamba proposes using bidirectional state space models (SSMs) for vision t
 ## Implemented vs. simplified
 
 **Pass 1 implementation:**
-- ✅ Bidirectional SSM block using a simplified state space model (not the full Mamba algorithm)
-- ✅ Positional embeddings for image patches
-- ✅ Forward/backward scanning of patch sequences
-- ✅ Minimal test with shape assertions
-- ⚠️ **Simplified:** Uses a linear SSM (no selective scanning; no hardware-aware complexity from Mamba v1). Just basic matrix operations to model state transitions.
-- ⚠️ **Simplified:** No layer norm or residual connections yet (added in pass 2)
-- ⚠️ **Simplified:** Patches are not extracted from real images; Pass 1 works with pre-flattened synthetic inputs
+- ✅ ImagePatcher: converts images to patch embeddings
+- ✅ PositionalEmbedding: learnable positional embeddings for patches
+- ✅ LinearSSMBlock: simple linear state space model (not selective)
+- ✅ VisionMambaBlock: combines SSM with layer norm and residual connections
+- ✅ VisionMambaPass1: stacks multiple blocks into an encoder
+- ⚠️ **Simplified:** LinearSSMBlock uses basic matrix operations without selective gating. No input-dependent state update modulation.
+- ⚠️ **Simplified:** Patches are assumed to be fixed-size; no multi-scale hierarchical feature extraction
+
+**Pass 2 implementation:**
+- ✅ SelectiveSSMBlock: SSM with learnable gating (sigmoid gate modulates state updates)
+- ✅ BidirectionalSSMBlock: scans forward and backward using SelectiveSSMBlock, combines with gated fusion
+- ✅ VisionMambaBlock: now supports both linear (unidirectional) and selective bidirectional SSM via use_bidirectional flag
+- ✅ VisionMambaPass2: uses bidirectional selective SSM blocks for improved context aggregation
+- ✅ Backward compatibility: Pass 1 continues to work with LinearSSMBlock (unidirectional)
+- ⚠️ **Simplified:** Selective gating is simple sigmoid-based; no learned dynamics or adaptive computation. Does not use actual Mamba-style hardware-aware complexity.
+- ⚠️ **Simplified:** Bidirectional combination is a simple gated linear fusion, not a learned cross-attention mechanism
+- ⚠️ **Simplified:** No multi-scale pyramid or hierarchical downsampling (reserved for Pass 3)
