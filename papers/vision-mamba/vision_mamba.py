@@ -297,3 +297,43 @@ class VisionMambaPass2(nn.Module):
         x = self.pos_embed(x)
         x = self.blocks(x)
         return x
+
+
+class VisionMambaPass3(nn.Module):
+    """Vision Mamba Pass 3: Classification head with global average pooling."""
+
+    def __init__(self, image_size, patch_size, in_channels, embed_dim,
+                 num_blocks, ssm_hidden_dim, num_classes):
+        super().__init__()
+        self.patcher = ImagePatcher(image_size, patch_size, in_channels, embed_dim)
+
+        num_patches = (image_size // patch_size) ** 2
+        self.pos_embed = PositionalEmbedding(num_patches, embed_dim)
+
+        self.blocks = nn.Sequential(*[
+            VisionMambaBlock(embed_dim, ssm_hidden_dim, use_bidirectional=True)
+            for _ in range(num_blocks)
+        ])
+
+        # Classification head: global average pooling + linear layer
+        self.classifier = nn.Linear(embed_dim, num_classes)
+
+    def forward(self, x):
+        """
+        Args:
+            x: (B, C, H, W)
+
+        Returns:
+            logits: (B, num_classes)
+        """
+        x = self.patcher(x)
+        x = self.pos_embed(x)
+        x = self.blocks(x)
+
+        # Global average pooling over patch dimension
+        x = x.mean(dim=1)  # (B, embed_dim)
+
+        # Linear classifier
+        logits = self.classifier(x)  # (B, num_classes)
+
+        return logits

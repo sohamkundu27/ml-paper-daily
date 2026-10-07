@@ -40,3 +40,13 @@ Vision Mamba proposes using bidirectional state space models (SSMs) for vision t
 - ⚠️ **Simplified:** Selective gating is simple sigmoid-based; no learned dynamics or adaptive computation. Does not use actual Mamba-style hardware-aware complexity.
 - ⚠️ **Simplified:** Bidirectional combination is a simple gated linear fusion, not a learned cross-attention mechanism
 - ⚠️ **Simplified:** No multi-scale pyramid or hierarchical downsampling (reserved for Pass 3)
+
+**Pass 3 implementation:**
+- ✅ VisionMambaPass3: extends Pass 2 backbone with classification head
+- ✅ Global average pooling: reduces (B, num_patches, embed_dim) to (B, embed_dim)
+- ✅ Linear classifier: projects embed_dim to num_classes for logit output
+- ✅ End-to-end inference: image (B, C, H, W) → logits (B, num_classes)
+- ✅ Training support: full backward pass with cross-entropy loss, verified on toy data
+- ⚠️ **Simplified:** Classification head is a single linear layer; no dense layers or feature fusion stages
+- ⚠️ **Simplified:** Global average pooling directly reduces patch dimension; no learnable aggregation weights
+- ⚠️ **Simplified:** No multi-scale hierarchical features or resolution adaptation
